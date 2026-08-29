@@ -1,0 +1,330 @@
+// VentureForge M1 Operating Kernel — data model.
+//
+// NOTE ON ENUMS: the SQLite connector does not support native Prisma
+// `enum` types (`prisma validate` rejects them outright). Every
+// enum-like column below is therefore a `String`, with the canonical
+// set of allowed values defined once in TypeScript (src/domain/**) and
+// enforced at every write path via Zod schemas (API boundary) and
+// domain guard functions (service layer) — never by trusting the
+// caller. See docs/DECISIONS.md for the full rationale and the
+// migration path to Postgres native enums later.
+//
+// All JSON-shaped data (arrays, free-form metadata) is stored as a
+// JSON-encoded `String` for the same reason: consistency with the
+// enum approach and no dependence on connector-specific Json handling.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Agent Registry
+// ---------------------------------------------------------------------------
+
+model Agent {
+  id          String @id @default(cuid())
+  name        String
+  role        String
+  department  String
+  description String
+  status      String @default("ACTIVE")
+
+  /// JSON-encoded string[] of descriptive capability tags (tools available).
+  /// NOT authorization — see AgentPermission for explicit grants.
+  capabilities String @default("[]")
+
+  modelProvider String? @map("model_provider")
+  modelName     String? @map("model_name")
+
+  parentAgentId String? @map("parent_agent_id")
+  parent        Agent?  @relation("AgentHierarchy", fields: [parentAgentId], references: [id], onDelete: SetNull)
+  children      Agent[] @relation("AgentHierarchy")
+
+  /// Ceiling autonomy level this agent may ever operate at (GREEN/YELLOW/ORANGE/RED).
+  riskLevel String @map("risk_level")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  permissions       AgentPermission[]
+  tasks             Task[]            @relation("AssignedTasks")
+  approvalRequests  ApprovalRequest[]
+  evidenceCollected Evidence[]
+
+  @@index([status])
+  @@index([department])
+  @@map("agents")
+}
+
+model AgentPermission {
+  id String @id @default(cuid())
+
+  agentId String @map("agent_id")
+  agent   Agent  @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  /// One of the Permission values (see src/domain/permission).
+  permission String
+
+  grantedBy String    @map("granted_by")
+  grantedAt DateTime  @default(now()) @map("granted_at")
+  revokedBy String?   @map("revoked_by")
+  revokedAt DateTime? @map("revoked_at")
+  reason    String?
+
+  @@index([agentId, permission])
+  @@map("agent_permissions")
+}
+
+// ---------------------------------------------------------------------------
+// Task Engine
+// ---------------------------------------------------------------------------
+
+model Task {
+  id        String @id @default(cuid())
+  title     String
+  objective String
+
+  assignedAgentId String? @map("assigned_agent_id")
+  assignedAgent   Agent?  @relation("AssignedTasks", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+
+  parentTaskId String? @map("parent_task_id")
+  parentTask   Task?   @relation("TaskHierarchy", fields: [parentTaskId], references: [id], onDelete: SetNull)
+  subtasks     Task[]  @relation("TaskHierarchy")
+
+  status    String @default("PENDING")
+  priority  String @default("NORMAL")
+  riskLevel String @map("risk_level")
+
+  /// JSON-encoded structured input/output; free text for error.
+  input  String?
+  output String?
+  error  String?
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  @@index([status])
+  @@index([assignedAgentId])
+  @@map("tasks")
+}
+
+// ---------------------------------------------------------------------------
+// Approval Engine (Human Decision Queue backing store)
+// ---------------------------------------------------------------------------
+
+model ApprovalRequest {
+  id String @id @default(cuid())
+
+  requestedByAgentId String @map("requested_by_agent_id")
+  requestedByAgent   Agent  @relation(fields: [requestedByAgentId], references: [id], onDelete: Restrict)
+
+  action      String
+  description String
+  riskLevel   String @map("risk_level")
+
+  /// What this approval request is about, so the queue can link back to
+  /// the resource under review (e.g. "OPPORTUNITY" / opportunity id).
+  /// Not in the Constitution's literal field list; added because the
+  /// vertical slice and decision-queue traceability requirement (M1 §11,
+  /// §28) are impossible without it. See docs/DECISIONS.md.
+  resourceType String? @map("resource_type")
+  resourceId   String? @map("resource_id")
+
+  /// JSON-encoded string[] of Evidence ids backing this request.
+  evidence String?
+  reason   String?
+
+  status String @default("PENDING")
+
+  reviewedBy     String?   @map("reviewed_by")
+  reviewedAt     DateTime? @map("reviewed_at")
+  decisionReason String?   @map("decision_reason")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt DateTime? @map("expires_at")
+
+  @@index([status])
+  @@index([resourceType, resourceId])
+  @@map("approval_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Evidence Engine
+// ---------------------------------------------------------------------------
+
+model Evidence {
+  id String @id @default(cuid())
+
+  claim           String
+  source          String
+  sourceType      String  @map("source_type")
+  sourceReference String? @map("source_reference")
+
+  collectedByAgentId String   @map("collected_by_agent_id")
+  collectedByAgent   Agent    @relation(fields: [collectedByAgentId], references: [id], onDelete: Restrict)
+  collectedAt        DateTime @default(now()) @map("collected_at")
+
+  /// Trustworthiness of the source (LOW/MEDIUM/HIGH).
+  reliability String
+  /// Collector's confidence that the claim is true, 0..1.
+  confidence  Float
+
+  verificationStatus String @default("UNVERIFIED") @map("verification_status")
+
+  /// JSON-encoded free-form metadata.
+  metadata String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  opportunityLinks OpportunityEvidence[]
+
+  @@index([collectedByAgentId])
+  @@index([sourceType])
+  @@map("evidence")
+}
+
+// ---------------------------------------------------------------------------
+// Opportunity Engine
+// ---------------------------------------------------------------------------
+
+model Opportunity {
+  id String @id @default(cuid())
+
+  title          String
+  problem        String
+  targetCustomer String @map("target_customer")
+  description    String
+
+  status String @default("DISCOVERED")
+
+  opportunityScore Float? @map("opportunity_score")
+  confidenceScore  Float? @map("confidence_score")
+
+  validationLevel String @default("LEVEL_0") @map("validation_level")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// JSON-encoded free-form metadata.
+  metadata String?
+
+  evidenceLinks OpportunityEvidence[]
+  scoreRecords  OpportunityScoreRecord[]
+
+  @@index([status])
+  @@map("opportunities")
+}
+
+model OpportunityEvidence {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  evidenceId String   @map("evidence_id")
+  evidence   Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([opportunityId, evidenceId])
+  @@map("opportunity_evidence")
+}
+
+/// Historical record of each time an Opportunity was scored, so a
+/// re-score never destroys the trail behind an earlier decision.
+model OpportunityScoreRecord {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  /// JSON-encoded per-dimension inputs (pain, demand, willingnessToPay, ...).
+  dimensions String
+
+  opportunityScore Float  @map("opportunity_score")
+  confidenceScore  Float  @map("confidence_score")
+  scoredBy         String @map("scored_by")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([opportunityId])
+  @@map("opportunity_score_records")
+}
+
+// ---------------------------------------------------------------------------
+// Memory Foundation
+// ---------------------------------------------------------------------------
+
+model Memory {
+  id String @id @default(cuid())
+
+  type    String
+  subject String
+  content String
+
+  source     String?
+  confidence Float?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// JSON-encoded free-form metadata.
+  metadata String?
+
+  @@index([type, subject])
+  @@map("memories")
+}
+
+// ---------------------------------------------------------------------------
+// Event Log (in-process outbox)
+// ---------------------------------------------------------------------------
+
+model Event {
+  id String @id @default(cuid())
+
+  type String
+
+  /// JSON-encoded payload — enough to reconstruct what happened.
+  payload String
+
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  @@index([type])
+  @@map("events")
+}
+
+// ---------------------------------------------------------------------------
+// Audit Log — append-only from the application layer (no update/delete
+// repository methods are exposed; see src/db/repositories/audit.repository.ts)
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id String @id @default(cuid())
+
+  actorType String  @map("actor_type")
+  actorId   String? @map("actor_id")
+
+  action       String
+  resourceType String  @map("resource_type")
+  resourceId   String? @map("resource_id")
+
+  riskLevel String? @map("risk_level")
+  result    String
+  reason    String?
+
+  /// JSON-encoded free-form metadata.
+  metadata String?
+
+  timestamp DateTime @default(now())
+
+  @@index([resourceType, resourceId])
+  @@index([actorId])
+  @@index([timestamp])
+  @@map("audit_logs")
+}

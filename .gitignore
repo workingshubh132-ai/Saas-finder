@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+
+# Environment
+.env
+.env.local
+
+# SQLite databases (dev/test only — never commit data)
+*.db
+*.db-journal
+prisma/dev.db
+prisma/test.db
+
+# Editor/OS
+.DS_Store
+*.log
