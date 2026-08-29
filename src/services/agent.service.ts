@@ -1,5 +1,4 @@
 import type { Agent, AgentPermission } from "@prisma/client";
-import { config } from "../config.js";
 import { agentPermissionRepository } from "../db/repositories/permission.repository.js";
 import { agentRepository } from "../db/repositories/agent.repository.js";
 import { AGENT_STATUS_TRANSITIONS, isAgentDepartment, isAgentStatus } from "../domain/agent/agent.types.js";
@@ -21,7 +20,7 @@ export interface CreateAgentParams {
   modelName?: string | null;
   parentAgentId?: string | null;
   riskLevel: string;
-  createdBy: string;
+  createdBy: Actor;
 }
 
 export interface Actor {
@@ -29,9 +28,19 @@ export interface Actor {
   actorId: string;
 }
 
-function assertHumanOwner(identity: string): void {
-  if (!config.humanOwnerIds.includes(identity)) {
-    throw new NotHumanOwnerError(identity);
+/**
+ * Defense-in-depth, kept from M1's `assertHumanOwner` (Constitution
+ * §8: "Do NOT allow an agent to mark its own high-risk action as
+ * approved" — the same principle covers creating agents and granting
+ * permissions). M2 replaces the env allow-list check with a check on
+ * the actor's own verified type: an `Actor` with `actorType: "HUMAN"`
+ * can only have been constructed from a real, authenticated HUMAN
+ * identity (`identityService.authenticate`) — nothing else in the
+ * codebase manufactures one. See docs/M2_ARCHITECTURE_PROPOSAL.md §3.
+ */
+export function assertHumanActor(actor: Actor): void {
+  if (actor.actorType !== "HUMAN") {
+    throw new NotHumanOwnerError(actor.actorId);
   }
 }
 
@@ -44,7 +53,7 @@ export const agentService = {
    * recommendation yet anyway (see docs/DECISIONS.md).
    */
   async createAgent(params: CreateAgentParams): Promise<Agent> {
-    assertHumanOwner(params.createdBy);
+    assertHumanActor(params.createdBy);
     if (!isAgentDepartment(params.department)) {
       throw new ValidationError(`Unknown department: ${params.department}`);
     }
@@ -69,8 +78,8 @@ export const agentService = {
     });
 
     await auditService.record({
-      actorType: "HUMAN",
-      actorId: params.createdBy,
+      actorType: params.createdBy.actorType,
+      actorId: params.createdBy.actorId,
       action: "CREATE_AGENT",
       resourceType: "AGENT",
       resourceId: agent.id,
@@ -120,16 +129,16 @@ export const agentService = {
   /**
    * An agent must not automatically receive unrestricted permissions
    * (Constitution §4 of the M1 brief), and an agent cannot grant itself
-   * one: grantedBy must resolve to a configured Human Owner identity,
-   * which no agent id ever is.
+   * one: grantedBy must be a verified HUMAN actor, which an agent can
+   * never present as (M2_ARCHITECTURE_PROPOSAL.md §6).
    */
   async grantPermission(params: {
     agentId: string;
     permission: string;
-    grantedBy: string;
+    grantedBy: Actor;
     reason?: string;
   }): Promise<AgentPermission> {
-    assertHumanOwner(params.grantedBy);
+    assertHumanActor(params.grantedBy);
     if (!isPermission(params.permission)) {
       throw new ValidationError(`Unknown permission: ${params.permission}`);
     }
@@ -143,13 +152,13 @@ export const agentService = {
     const grant = await agentPermissionRepository.grant({
       agentId: params.agentId,
       permission: params.permission,
-      grantedBy: params.grantedBy,
+      grantedBy: params.grantedBy.actorId,
       reason: params.reason ?? null,
     });
 
     await auditService.record({
-      actorType: "HUMAN",
-      actorId: params.grantedBy,
+      actorType: params.grantedBy.actorType,
+      actorId: params.grantedBy.actorId,
       action: "GRANT_PERMISSION",
       resourceType: "AGENT",
       resourceId: params.agentId,
@@ -160,18 +169,18 @@ export const agentService = {
     return grant;
   },
 
-  async revokePermission(params: { permissionId: string; revokedBy: string }): Promise<AgentPermission> {
-    assertHumanOwner(params.revokedBy);
+  async revokePermission(params: { permissionId: string; revokedBy: Actor }): Promise<AgentPermission> {
+    assertHumanActor(params.revokedBy);
 
     const grant = await agentPermissionRepository.findById(params.permissionId);
     if (!grant) throw new NotFoundError("AgentPermission", params.permissionId);
     if (grant.revokedAt) throw new ValidationError("Permission grant is already revoked.");
 
-    const updated = await agentPermissionRepository.revoke(params.permissionId, params.revokedBy);
+    const updated = await agentPermissionRepository.revoke(params.permissionId, params.revokedBy.actorId);
 
     await auditService.record({
-      actorType: "HUMAN",
-      actorId: params.revokedBy,
+      actorType: params.revokedBy.actorType,
+      actorId: params.revokedBy.actorId,
       action: "REVOKE_PERMISSION",
       resourceType: "AGENT",
       resourceId: grant.agentId,

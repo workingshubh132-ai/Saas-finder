@@ -71,7 +71,7 @@ describe("authorizationService.authorize", () => {
     await agentService.transitionStatus({
       id: agent.id,
       toStatus: "SUSPENDED",
-      actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+      actor: HUMAN_OWNER,
     });
 
     const decision = await authorizationService.authorize({ agentId: agent.id, action: "READ_WEB" });
@@ -82,7 +82,7 @@ describe("authorizationService.authorize", () => {
   it("an agent cannot grant itself a permission", async () => {
     const agent = await makeAgent();
     await expect(
-      agentService.grantPermission({ agentId: agent.id, permission: "SPEND_MONEY", grantedBy: agent.id }),
+      agentService.grantPermission({ agentId: agent.id, permission: "SPEND_MONEY", grantedBy: { actorType: "AGENT", actorId: agent.id } }),
     ).rejects.toThrow(NotHumanOwnerError);
   });
 

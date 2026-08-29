@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
+import { AuthorizationDeniedError } from "../../domain/shared/errors.js";
 import { researchIntakeService } from "../../services/research-intake.service.js";
 import { asyncHandler } from "../middleware/async-handler.js";
+import { getActor, requireAuth } from "../middleware/authenticate.js";
 import { validateBody } from "../middleware/validate.js";
 
 export const researchSignalsRouter = Router();
@@ -54,9 +56,17 @@ const researchSignalSchema = z.object({
  */
 researchSignalsRouter.post(
   "/",
+  requireAuth(),
   validateBody(researchSignalSchema),
   asyncHandler(async (req, res) => {
-    const result = await researchIntakeService.intake(req.body as z.infer<typeof researchSignalSchema>);
+    const body = req.body as z.infer<typeof researchSignalSchema>;
+    const actor = getActor(req);
+    // Same rule as evidence collection: an AGENT identity can only run
+    // a research signal as itself, never impersonate a different agent.
+    if (actor.type === "AGENT" && body.agentId !== actor.id) {
+      throw new AuthorizationDeniedError("An AGENT identity can only submit a research signal attributed to itself.");
+    }
+    const result = await researchIntakeService.intake(body);
     res.status(201).json(result);
   }),
 );

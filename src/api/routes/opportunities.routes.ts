@@ -1,16 +1,15 @@
 import { Router } from "express";
 import { z } from "zod";
+import { AuthorizationDeniedError } from "../../domain/shared/errors.js";
+import { approvalService } from "../../services/approval.service.js";
+import { chairmanService } from "../../services/chairman.service.js";
 import { opportunityService } from "../../services/opportunity.service.js";
 import { asyncHandler } from "../middleware/async-handler.js";
+import { getActor, requireAuth, toActor } from "../middleware/authenticate.js";
 import { requireParam } from "../middleware/params.js";
 import { validateBody } from "../middleware/validate.js";
 
 export const opportunitiesRouter = Router();
-
-const actorSchema = z.object({
-  actorType: z.enum(["AGENT", "HUMAN", "SYSTEM"]),
-  actorId: z.string().min(1),
-});
 
 const createOpportunitySchema = z.object({
   title: z.string().min(1),
@@ -18,20 +17,22 @@ const createOpportunitySchema = z.object({
   targetCustomer: z.string().min(1),
   description: z.string().min(1),
   metadata: z.record(z.string(), z.unknown()).optional(),
-  discoveredBy: actorSchema,
 });
 
 opportunitiesRouter.post(
   "/",
+  requireAuth(),
   validateBody(createOpportunitySchema),
   asyncHandler(async (req, res) => {
-    const opportunity = await opportunityService.createOpportunity(req.body as z.infer<typeof createOpportunitySchema>);
+    const body = req.body as z.infer<typeof createOpportunitySchema>;
+    const opportunity = await opportunityService.createOpportunity({ ...body, discoveredBy: toActor(getActor(req)) });
     res.status(201).json(opportunity);
   }),
 );
 
 opportunitiesRouter.get(
   "/",
+  requireAuth(),
   asyncHandler(async (req, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
     res.json(await opportunityService.listOpportunities({ status }));
@@ -40,6 +41,7 @@ opportunitiesRouter.get(
 
 opportunitiesRouter.get(
   "/:id",
+  requireAuth(),
   asyncHandler(async (req, res) => {
     res.json(await opportunityService.getOrThrow(requireParam(req, "id")));
   }),
@@ -47,19 +49,25 @@ opportunitiesRouter.get(
 
 opportunitiesRouter.get(
   "/:id/evidence",
+  requireAuth(),
   asyncHandler(async (req, res) => {
     res.json(await opportunityService.listEvidence(requireParam(req, "id")));
   }),
 );
 
-const attachEvidenceSchema = z.object({ evidenceId: z.string().min(1), actor: actorSchema });
+const attachEvidenceSchema = z.object({ evidenceId: z.string().min(1) });
 
 opportunitiesRouter.post(
   "/:id/evidence",
+  requireAuth(),
   validateBody(attachEvidenceSchema),
   asyncHandler(async (req, res) => {
     const body = req.body as z.infer<typeof attachEvidenceSchema>;
-    const evidence = await opportunityService.attachEvidence({ opportunityId: requireParam(req, "id"), ...body });
+    const evidence = await opportunityService.attachEvidence({
+      opportunityId: requireParam(req, "id"),
+      ...body,
+      actor: toActor(getActor(req)),
+    });
     res.status(201).json(evidence);
   }),
 );
@@ -81,6 +89,7 @@ const scoreOpportunitySchema = z.object({ dimensions: dimensionsSchema, scoredBy
 
 opportunitiesRouter.post(
   "/:id/score",
+  requireAuth(),
   validateBody(scoreOpportunitySchema),
   asyncHandler(async (req, res) => {
     const body = req.body as z.infer<typeof scoreOpportunitySchema>;
@@ -91,31 +100,96 @@ opportunitiesRouter.post(
 
 opportunitiesRouter.get(
   "/:id/scores",
+  requireAuth(),
   asyncHandler(async (req, res) => {
     res.json(await opportunityService.listScoreHistory(requireParam(req, "id")));
   }),
 );
 
-const transitionSchema = z.object({ toStatus: z.string(), actor: actorSchema });
+const transitionSchema = z.object({ toStatus: z.string() });
 
 opportunitiesRouter.post(
   "/:id/status",
+  requireAuth(),
   validateBody(transitionSchema),
   asyncHandler(async (req, res) => {
     const body = req.body as z.infer<typeof transitionSchema>;
-    const opportunity = await opportunityService.transition({ id: requireParam(req, "id"), ...body });
+    const opportunity = await opportunityService.transition({
+      id: requireParam(req, "id"),
+      ...body,
+      actor: toActor(getActor(req)),
+    });
     res.json(opportunity);
   }),
 );
 
-const validationLevelSchema = z.object({ validationLevel: z.string(), actor: actorSchema });
+const validationLevelSchema = z.object({ validationLevel: z.string() });
 
 opportunitiesRouter.post(
   "/:id/validation-level",
+  requireAuth(),
   validateBody(validationLevelSchema),
   asyncHandler(async (req, res) => {
     const body = req.body as z.infer<typeof validationLevelSchema>;
-    const opportunity = await opportunityService.setValidationLevel({ id: requireParam(req, "id"), ...body });
+    const opportunity = await opportunityService.setValidationLevel({
+      id: requireParam(req, "id"),
+      ...body,
+      actor: toActor(getActor(req)),
+    });
     res.json(opportunity);
+  }),
+);
+
+/** Triggers a new Chairman review (M2 brief Parts 15-16). Feeds the Human Decision Queue; never itself decides anything. */
+opportunitiesRouter.post(
+  "/:id/chairman-review",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    const result = await chairmanService.review({ opportunityId: requireParam(req, "id"), reviewedBy: getActor(req) });
+    res.status(201).json(result);
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/chairman-reviews",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await chairmanService.listReviews(requireParam(req, "id")));
+  }),
+);
+
+const requestApprovalSchema = z.object({
+  requestedByAgentId: z.string().min(1),
+  action: z.string(),
+  description: z.string().min(1),
+  riskLevel: z.string(),
+  reason: z.string().optional(),
+  evidenceIds: z.array(z.string()).optional(),
+});
+
+/**
+ * The formal ask that puts this opportunity in front of the Human
+ * Decision Queue (Constitution §28: PROPOSAL -> CEO -> CHAIRMAN REVIEW
+ * -> GUARDIAN REVIEW -> HUMAN APPROVAL) — a separate, explicit step
+ * from discovering/scoring it (researchAgentService) and from
+ * Chairman review (chairmanService), matching that four-stage
+ * pipeline rather than folding every stage into one call.
+ */
+opportunitiesRouter.post(
+  "/:id/request-approval",
+  requireAuth(),
+  validateBody(requestApprovalSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.body as z.infer<typeof requestApprovalSchema>;
+    const actor = getActor(req);
+    if (actor.type === "AGENT" && body.requestedByAgentId !== actor.id) {
+      throw new AuthorizationDeniedError("An AGENT identity can only request approval attributed to itself.");
+    }
+    const request = await approvalService.requestApproval({
+      ...body,
+      resourceType: "OPPORTUNITY",
+      resourceId: requireParam(req, "id"),
+    });
+    res.status(201).json(request);
   }),
 );

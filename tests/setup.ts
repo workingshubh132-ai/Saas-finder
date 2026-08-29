@@ -8,15 +8,24 @@ import { TEST_DATABASE_URL } from "./test-db.js";
 // process.env is set. Test files importing services normally are safe
 // because Vitest fully runs setupFiles before loading the test file.
 process.env.DATABASE_URL = TEST_DATABASE_URL;
-process.env.HUMAN_OWNER_IDS = process.env.HUMAN_OWNER_IDS ?? "founder,second-owner";
 process.env.PORT = process.env.PORT ?? "0";
+// No live model/network dependency in the automated suite — ever.
+process.env.MODEL_PROVIDER_MODE = "development";
+process.env.RESEARCH_TOOL_MODE = "development";
 
 const { prisma } = await import("../src/db/client.js");
+const { identityService } = await import("../src/services/identity.service.js");
+const { registerDefaultTools } = await import("../src/tools/register-tools.js");
+
+registerDefaultTools();
 
 async function resetDatabase(): Promise<void> {
   await prisma.auditLog.deleteMany();
   await prisma.event.deleteMany();
   await prisma.memory.deleteMany();
+  await prisma.toolExecution.deleteMany();
+  await prisma.agentExecution.deleteMany();
+  await prisma.chairmanReview.deleteMany();
   await prisma.opportunityScoreRecord.deleteMany();
   await prisma.opportunityEvidence.deleteMany();
   await prisma.approvalRequest.deleteMany();
@@ -24,9 +33,22 @@ async function resetDatabase(): Promise<void> {
   await prisma.opportunity.deleteMany();
   await prisma.task.deleteMany();
   await prisma.agentPermission.deleteMany();
+  await prisma.identity.deleteMany();
   await prisma.agent.deleteMany();
 }
 
+/**
+ * A verified HUMAN Actor, freshly bootstrapped before every single
+ * test (the database — identities included — is wiped first, so the
+ * one-time bootstrap path in identityService.createIdentity is always
+ * available here). Tests that need a *second* distinct human should
+ * call identityService.createIdentity themselves with `humanOwner` as
+ * `createdBy`.
+ */
+export let humanOwner: { actorType: "HUMAN"; actorId: string };
+
 beforeEach(async () => {
   await resetDatabase();
+  const { identity } = await identityService.createIdentity({ type: "HUMAN", label: "Test Founder", createdBy: null });
+  humanOwner = { actorType: "HUMAN", actorId: identity.id };
 });

@@ -102,7 +102,7 @@ describe("M1 vertical slice: signal -> opportunity -> evidence -> score -> appro
       decisionReason: "Evidence and score both support moving forward.",
     });
     expect(decision.status).toBe("APPROVED");
-    expect(decision.reviewedBy).toBe(HUMAN_OWNER);
+    expect(decision.reviewedBy).toBe(HUMAN_OWNER.actorId);
 
     const finalQueue = await decisionQueueService.listQueue();
     expect(finalQueue.find((item) => item.approvalRequest.id === result.approvalRequest.id)).toBeUndefined();

@@ -1,5 +1,15 @@
 # Security
 
+> **M2 note:** this document's original content (below) is M1's threat
+> model, kept verbatim as a historical record — nothing in it has been
+> deleted or rewritten. M2 closed the "no authentication" gap it
+> documents and added a real agent-execution attack surface; **see the
+> "M2 — Agent Execution + Governance Brain" section at the end of this
+> file** for what changed, what's new, and the 12-category threat
+> review the M2 brief requires. Sections below marked *(superseded in
+> M2 — see the M2 section)* describe an M1 mechanism M2 replaced;
+> they're kept for history, not as current behavior.
+
 ## Threat model for M1
 
 M1 is a **single-tenant, trusted-caller backend**. It is designed to
@@ -9,7 +19,7 @@ Everything below assumes that deployment boundary; widening it is a
 "decision requiring founder approval" (see the M1 engineering report),
 not something to do silently.
 
-## No authentication — a documented decision, not an oversight
+## No authentication — a documented decision, not an oversight *(superseded in M2 — see the M2 section)*
 
 M1 ships with **no login system**. Every service call and HTTP
 endpoint takes the acting identity as an explicit, caller-supplied
@@ -43,12 +53,14 @@ this agent allowed to do this right now?":
 Every call is audited regardless of outcome (`AuditLog` with
 `result = DENIED` or `SUCCESS`).
 
-## Permission grants are explicit and human-gated
+## Permission grants are explicit and human-gated *(mechanism updated in M2 — see the M2 section)*
 
 - Creating an agent, granting a permission, and revoking a permission
   all require `assertHumanOwner()` — the caller-supplied identity must
   be in the `HUMAN_OWNER_IDS` allow-list (`src/config.ts`). No agent id
-  is ever placed in that list by the system.
+  is ever placed in that list by the system. **(M1 mechanism; M2
+  replaced the allow-list check with a verified bearer-token identity
+  check — same rule, stronger enforcement. See the M2 section.)**
 - **An agent cannot grant itself a permission.** This is enforced
   structurally (the grant endpoint only accepts a recognized Human
   Owner identity), tested directly in
@@ -132,3 +144,261 @@ assumed away — closing it is part of the Postgres migration in
 dependencies. The handful of advisories `npm audit` reports overall
 are in transitive dev/lint tooling only (not shipped, not on the
 runtime path) and were not chased further in M1.
+
+---
+
+## M2 — Agent Execution + Governance Brain
+
+Everything below is new in M2. It does not delete or reinterpret
+anything above except where explicitly marked *(superseded in M2)* —
+this section is additive: M2 closes M1's two self-documented gaps
+(no authentication; no agent execution, `DECISIONS.md` #11/#13) and
+then has to secure the new surface that agent execution itself opens.
+
+### Authentication — M1's gap, closed
+
+M1 shipped with no login system by design, with an explicit warning
+not to expose it beyond its founder without adding real
+authentication first (see above). M2 adds that layer:
+
+- **`identities` table**: `type` (`HUMAN`/`AGENT`/`SYSTEM`), a SHA-256
+  `token_hash` (unique), a display-only `token_prefix`, `status`
+  (`ACTIVE`/`REVOKED`), optional `expires_at`. A token is a random
+  32-byte secret (`vf_<base64url>`, `src/domain/shared/tokens.ts`),
+  shown to the caller **exactly once**, at creation — never stored in
+  plaintext, never re-returned by any later endpoint (`identities.routes.ts`
+  explicitly constructs its list/detail responses without the raw
+  token, only `tokenPrefix`).
+- **`requireAuth()`/`requireHuman()`** (`src/api/middleware/authenticate.ts`)
+  resolve `Authorization: Bearer <token>` → hash → identity lookup →
+  `req.actor = { type, id, identityId }`, and gate every privileged M1
+  and M2 endpoint. A missing/invalid/revoked/expired token is
+  `401 AUTHENTICATION_ERROR`; a validly-authenticated but wrong-type
+  actor (e.g. an `AGENT` calling a `requireHuman()` route) is
+  `403 AUTHORIZATION_ERROR` (`NotHumanOwnerError`) — deliberately
+  distinct status codes, since the second case is "we know exactly who
+  you are, and you're not allowed," not "we don't know who you are."
+- **Bootstrap, and why it can't be exploited to re-open**: `POST /api/identities`
+  allows one unauthenticated call — creating the very first `HUMAN`
+  identity — only when `identityRepository.countAll() === 0`
+  (`identityService.createIdentity`). The instant that call succeeds,
+  the table is non-empty forever; every subsequent call (including a
+  hypothetical attempt to create a *second* "first" identity) requires
+  an authenticated `HUMAN` caller. There is no delete-all-identities
+  endpoint, so this path cannot be artificially re-triggered by an
+  attacker short of direct database access — which is already outside
+  this application's trust boundary.
+- **`AGENT` identities require a human and a real agent**: `identityService.createIdentity`
+  rejects an `AGENT`-type request unless the caller is an authenticated
+  `HUMAN` *and* `agentId` names an `Agent` row that already exists.
+  There is no path that mints an agent credential without a human
+  first having created that agent (`assertHumanActor`, unchanged since
+  M1) through the ordinary, audited `POST /api/agents`.
+- Explicitly **not** built, matching "keep the first implementation
+  minimal": password/login flows, JWTs, OAuth, role hierarchies beyond
+  the three identity types, session cookies, a dashboard. Opaque
+  DB-backed tokens were chosen over JWTs specifically because
+  revocation is then a single `UPDATE` with no blacklist and no
+  signing-key lifecycle to manage (`M2_ARCHITECTURE_PROPOSAL.md` §17).
+
+### Agent impersonation — closing the body-supplied-identity hole
+
+Every M1 route that used to read `actorType`/`actorId`/`createdBy`/
+`grantedBy`/`reviewedBy`/`collectedByAgentId` **from the request
+body** now reads the caller's identity from `req.actor`, set only by
+`requireAuth()`/`requireHuman()` from a verified token — Zod schemas
+for these routes no longer even accept an actor field, so there is
+nothing for a malicious body to override.
+
+That alone stops a caller from *claiming* to be someone else for
+audit/attribution purposes, but several M1 fields still *name* an
+agent as data (`collectedByAgentId`, `requestedByAgentId`, etc.) —
+without an extra check, an authenticated `AGENT` could submit evidence
+or request approval "attributed to" a *different* agent it doesn't
+control, muddying the audit trail even though the request itself was
+authenticated. `evidence.routes.ts`, `opportunities.routes.ts`
+(`:id/request-approval`), and `research-signals.routes.ts` each add:
+
+```ts
+if (actor.type === "AGENT" && body.<agentIdField> !== actor.id) {
+  throw new AuthorizationDeniedError(...);
+}
+```
+
+A `HUMAN`/`SYSTEM` caller is unrestricted here (recording evidence "on
+behalf of" an agent, e.g. from manual intake, is legitimate and
+predates M2); only an `AGENT` identity is locked to attributing
+actions to itself. Not currently needed on `evidence/:id/verification`
+or `opportunities/:id/status` — those don't take an agent-identifying
+body field at all, so there is nothing to spoof there in the first
+place.
+
+### Self-approval — extended, not weakened
+
+M1's dual guard is unchanged and still enforced: `approvalService.decide`
+requires a `HUMAN` actor *and* independently rejects
+`reviewedBy.actorId === request.requestedByAgentId`
+(`SelfApprovalError`). M2 makes the first half of that guarantee
+categorically stronger: in M1, "human" meant "string is in an env-var
+allow-list"; in M2 it means "holds a token for an identity whose
+`type` is `HUMAN`," and **no code path exists that mints a `HUMAN`-type
+identity for an agent** (`identityService.createIdentity`'s bootstrap
+and human-authenticated-creation paths are the only two ways a
+`HUMAN` identity is ever created, and neither takes an `agentId`).
+
+Extended to the new execution surface: an `AgentExecution`'s
+`startedByIdentityId` records *who started the run* for audit purposes
+only — it grants nothing. Every tool call inside that execution is
+authorized against the *executing agent's own* permission grants
+(`AGENT_RUNTIME.md`), never the starting human's. A human starting a
+research run cannot thereby lend the agent any capability the agent
+wasn't already, separately, granted.
+
+### Secrets
+
+Unchanged principle from M1 (no secret hardcoded; `.env` git-ignored;
+`.env.example` has no real values), extended to two new secret shapes:
+
+- **Bearer tokens**: only the SHA-256 hash and a 10-character display
+  prefix are ever persisted (`tokens.ts`); the plaintext token exists
+  only in the single HTTP response that creates it and is never
+  logged, never included in any audit metadata (`identityService`'s
+  audit calls record `type`/`bootstrap` only), and never returned by
+  `GET /api/identities`, `GET /api/identities/me`, or the revoke
+  endpoint.
+- **`ANTHROPIC_API_KEY`**: read from process env only
+  (`AnthropicModelProvider`), never persisted to any table, never
+  included in an `AgentExecution` row (which stores `modelProvider`/
+  `modelName` — descriptive strings — never credentials), never logged.
+- Error responses (`error-handler.ts`) return `{ error, errorCode, message }`
+  built only from a `DomainError`'s own deliberately-worded `message`;
+  any non-`DomainError`/non-`ZodError` exception is logged server-side
+  with `console.error` but returns a **generic** `"Unexpected server
+  error"` to the caller — no stack trace, no raw exception message,
+  and therefore no accidental leak of an internal path, query, or
+  credential value through a 500 response.
+
+### The 12-category review (M2 brief Part 29)
+
+1. **Prompt injection.** Search-result content (titles/snippets from
+   `hn_search`) reaches the model only inside a user-role message's
+   JSON payload during the SYNTHESIZE step
+   (`research-agent.service.ts`) — never as a system instruction, and
+   the tool the pipeline calls is a hardcoded constant
+   (`RESEARCH_TOOL_ID`), not something injected content could redirect.
+   *Mitigated:* the pipeline's shape (which tool runs, how many calls,
+   what happens to the output) cannot be altered by model output —
+   only the *content* of fields inside the fixed output schema can be
+   influenced, and every one of those fields lands as an `UNVERIFIED`
+   `Evidence` row that still has to clear scoring, Chairman review, and
+   a human decision before it means anything. *Remaining risk:* no
+   explicit injected-instruction detection/filtering runs over tool
+   results before they reach the model; a sophisticated injected claim
+   could still produce a misleadingly-worded (but schema-valid, always
+   `UNVERIFIED`) finding that a human reviewer has to catch. Flagged
+   for M3, not solved here.
+2. **Tool abuse.** The one tool is read-only, has a fixed target URL
+   (no caller-suppliable destination — no SSRF vector), and is bounded
+   on query length, result count, and timeout (`TOOL_SYSTEM.md`).
+   *Remaining risk:* none identified for the current tool; a future
+   write-capable tool would need the mid-execution-approval mechanism
+   this milestone defers (`AGENT_RUNTIME.md`) before it could safely
+   exist behind a non-GREEN permission.
+3. **Privilege escalation.** Grant/revoke still human-only
+   (`assertHumanActor`); `authorize()` is re-checked on every tool
+   call, not cached, so a mid-flight revocation takes effect
+   immediately; an `AGENT` identity can never be minted without a
+   pre-existing, human-created `Agent` row. *Remaining risk:* none
+   identified beyond what M1 already carried (a compromised `HUMAN`
+   token is still the root trust anchor, same as a compromised
+   `HUMAN_OWNER_IDS` entry was in M1).
+4. **Agent impersonation.** Closed as described above — actor identity
+   comes only from a verified token, never a request body, and the
+   agent-attribution guard stops a valid `AGENT` token from acting
+   "as" a different agent. *Remaining risk:* none identified.
+5. **Self-approval.** M1's dual guard preserved and strengthened as
+   described above, extended to execution start/tool-authorization.
+   *Remaining risk:* none identified.
+6. **Secret exposure.** Tokens hashed at rest, shown once; API keys
+   env-only; error responses never carry stack traces or raw
+   exceptions (see Secrets above). *Remaining risk:* server-side
+   `console.error` logging of unexpected errors could still write a
+   sensitive value to process logs if a future exception message ever
+   embedded one — no different from any Node service; not specific to
+   M2, not separately mitigated beyond "don't put secrets in thrown
+   error messages," which every current error class already respects.
+7. **Unbounded execution.** Hard budgets on steps/tool calls/model
+   calls/duration, checked before every external call, no recursive or
+   self-spawning execution, bounded retries only on genuinely transient
+   errors (`AGENT_RUNTIME.md`). *Remaining risk:* none identified for
+   the current fixed-pipeline agent; a future dynamic planner would
+   need its own step-generation bound reviewed before shipping.
+8. **Runaway cost.** `maxModelCalls`/`maxToolCalls` cap external call
+   count; `maxOutputTokens` caps worst-case response size per call.
+   *Remaining risk, stated plainly:* `estimatedCostUsd`/token columns
+   exist on `AgentExecution` but are not yet populated from a real
+   Anthropic response's usage data, and there is no `maxCostUsd`
+   budget enforced independently of call count — today's protection is
+   "bounded number of bounded-size calls," not "bounded dollars."
+   Acceptable for M2 because the only real-provider path
+   (`AnthropicModelProvider`) is not live-exercised in this
+   environment and no automated spend occurs anywhere in the system
+   (Constitution's Capital Discipline, `SPEND_MONEY` is `RED` and
+   unimplemented as an actuator); flagged as a required addition
+   before a real deployment runs with a live model key attached to a
+   billing account. See `AGENT_RUNTIME.md`.
+9. **Malicious/misleading research content.** Nothing from a tool or
+   model call is trusted as ground truth: every finding becomes
+   `UNVERIFIED` evidence, scoring is a deterministic function of
+   confidence/relevance (not model-asserted), the Chairman is required
+   to raise objections (never zero), and no automatic action (spend,
+   external message, deployment) is ever taken on research content
+   alone — every path terminates at the Human Decision Queue.
+   *Remaining risk:* a human could still be misled by a
+   plausible-sounding fabricated finding if they skip reading the
+   Chairman's objections; this is a human-process risk the system
+   surfaces evidence for but cannot fully close by itself.
+10. **External URL / tool-result handling.** `sourceReference` URLs
+    from search results are stored as opaque strings on `Evidence` —
+    nothing in the application ever fetches, renders, or re-requests
+    them. Only `hacker-news-search.tool.ts` itself calls `fetch`, and
+    only against its own fixed endpoint. *Remaining risk:* none
+    identified; a future feature that *does* dereference a stored
+    `sourceReference` (e.g. a UI preview) would need its own SSRF
+    review at that time.
+11. **Database tampering.** Unchanged mechanism from M1 (Prisma
+    parameterized queries throughout; no raw SQL string concatenation
+    anywhere), extended with SQLite `CHECK` constraints on every new
+    enum-like/bounded column in the M2 migration (`identities.type`/
+    `status`, `agent_executions.status`/`error_code`,
+    `estimated_cost_usd >= 0`, `chairman_reviews.decision`,
+    `confidence` 0–1). FK `onDelete` policies are chosen deliberately
+    per relationship (e.g. `AgentExecution.agentId` is `Restrict` — an
+    agent with execution history cannot be deleted out from under it;
+    `ToolExecution.executionId` is `Cascade` — a tool-call record has
+    no meaning without its parent execution).
+12. **Audit log manipulation.** Unchanged mechanism from M1
+    (`audit.repository.ts` exports only `record`/`list`, still no
+    update or delete path anywhere in the application), extended with
+    new action names (`START_AGENT_EXECUTION`,
+    `AGENT_EXECUTION_COMPLETED`/`FAILED`, `CHAIRMAN_REVIEW_<decision>`,
+    `CREATE_IDENTITY`, `REVOKE_IDENTITY`). *Remaining risk, carried
+    over unchanged from M1:* this is still an application-layer
+    guarantee only — SQLite has no per-table grant system to make
+    "audit log is append-only" a database-level guarantee. Not
+    re-solved in M2; still tracked as the same Postgres-migration item
+    in `DECISIONS.md`.
+
+### Least privilege — unchanged, reaffirmed under execution
+
+A newly created `Agent` still starts with zero grants (M1, unchanged).
+The runtime's `callTool` re-checks `authorize()` on every single call
+rather than once per execution, so "least privilege" holds
+continuously through a run, not just at its start.
+
+### Dependency posture (M2)
+
+`npm audit --omit=dev` still reports **zero** vulnerabilities in
+production dependencies after adding M2's code (no new production
+dependency was introduced — `AnthropicModelProvider` and
+`HackerNewsSearchTool` both use the global `fetch`, not an SDK).

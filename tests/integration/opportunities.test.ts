@@ -30,7 +30,7 @@ describe("opportunityService", () => {
     });
     expect(opportunity.status).toBe("DISCOVERED");
 
-    const actor = { actorType: "HUMAN" as const, actorId: HUMAN_OWNER };
+    const actor = HUMAN_OWNER;
     await opportunityService.transition({ id: opportunity.id, toStatus: "RESEARCHING", actor });
     await opportunityService.transition({ id: opportunity.id, toStatus: "VALIDATING", actor });
     await opportunityService.transition({ id: opportunity.id, toStatus: "VALIDATED", actor });
@@ -54,7 +54,7 @@ describe("opportunityService", () => {
       opportunityService.transition({
         id: opportunity.id,
         toStatus: "APPROVED",
-        actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+        actor: HUMAN_OWNER,
       }),
     ).rejects.toThrow(InvalidTransitionError);
   });
@@ -78,7 +78,7 @@ describe("opportunityService", () => {
     expect(history[0]?.scoredBy).toBe(agent.id);
   });
 
-  it("cannot claim a validation level above LEVEL_0 without evidence", async () => {
+  it("cannot claim a validation level above LEVEL_0 without evidence, and can once evidence exists", async () => {
     const agent = await makeAgent();
     const opportunity = await opportunityService.createOpportunity({
       title: "x",
@@ -110,11 +110,14 @@ describe("opportunityService", () => {
       actor: { actorType: "AGENT", actorId: agent.id },
     });
 
+    // LEVEL_1 only, not LEVEL_2+: the fuller per-level policy
+    // (docs/VALIDATION_POLICY.md) requires more than one evidence
+    // record for LEVEL_2 and above — see tests/integration/validation-policy.test.ts.
     const updated = await opportunityService.setValidationLevel({
       id: opportunity.id,
-      validationLevel: "LEVEL_2",
+      validationLevel: "LEVEL_1",
       actor: { actorType: "AGENT", actorId: agent.id },
     });
-    expect(updated.validationLevel).toBe("LEVEL_2");
+    expect(updated.validationLevel).toBe("LEVEL_1");
   });
 });

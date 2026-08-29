@@ -1,8 +1,11 @@
 import type { Evidence, Opportunity } from "@prisma/client";
+import { chairmanReviewRepository } from "../db/repositories/chairman-review.repository.js";
 import { evidenceRepository } from "../db/repositories/evidence.repository.js";
 import { opportunityRepository } from "../db/repositories/opportunity.repository.js";
+import { isEvidenceReliability, isEvidenceSourceType } from "../domain/evidence/evidence.types.js";
 import { isOpportunityStatus, OPPORTUNITY_STATUS_TRANSITIONS } from "../domain/opportunity/opportunity.types.js";
 import { isValidationLevel } from "../domain/opportunity/validation-level.js";
+import { checkValidationLevelRequirement, VALIDATION_LEVEL_REQUIREMENTS, type EvidenceSummaryItem } from "../domain/opportunity/validation-policy.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { toJsonString } from "../domain/shared/json.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
@@ -12,6 +15,19 @@ import { eventBus } from "./event-bus.js";
 import { DeterministicOpportunityScorer, type OpportunityScoreDimensions, type OpportunityScorer } from "./opportunity-scorer.js";
 
 const defaultScorer: OpportunityScorer = new DeterministicOpportunityScorer();
+
+function toEvidenceSummary(evidence: readonly Evidence[]): EvidenceSummaryItem[] {
+  const summary: EvidenceSummaryItem[] = [];
+  for (const item of evidence) {
+    // Excludes (rather than crashes on) a corrupt row — CHECK
+    // constraints make this unreachable in practice, but a stricter
+    // level should never be reachable by an unrecognized value either.
+    if (isEvidenceSourceType(item.sourceType) && isEvidenceReliability(item.reliability)) {
+      summary.push({ sourceType: item.sourceType, reliability: item.reliability, confidence: item.confidence });
+    }
+  }
+  return summary;
+}
 
 export interface CreateOpportunityParams {
   title: string;
@@ -154,21 +170,37 @@ export const opportunityService = {
   /**
    * Agents must not claim a validation level unsupported by evidence
    * (Constitution §14: "must not claim Level 6 based only on Level 1
-   * evidence"). M1's foundation-level guard: any level above LEVEL_0
-   * requires at least one attached Evidence record. The full policy
-   * (which level a given evidence mix actually justifies) is M2 scope.
+   * evidence"). The formal per-level policy — minimum evidence count,
+   * confidence, required evidence type/reliability, and whether a
+   * HUMAN actor and a standing Chairman APPROVE review are required —
+   * lives in domain/opportunity/validation-policy.ts (M2 brief Part
+   * 14; docs/VALIDATION_POLICY.md). Every unmet condition is reported,
+   * never silently rounded up.
    */
   async setValidationLevel(params: { id: string; validationLevel: string; actor: Actor }): Promise<Opportunity> {
     if (!isValidationLevel(params.validationLevel)) {
       throw new ValidationError(`Unknown validation level: ${params.validationLevel}`);
     }
     const opportunity = await opportunityService.getOrThrow(params.id);
+    const requirement = VALIDATION_LEVEL_REQUIREMENTS[params.validationLevel];
 
-    if (params.validationLevel !== "LEVEL_0") {
-      const evidenceCount = await opportunityRepository.countEvidence(params.id);
-      if (evidenceCount === 0) {
+    if (requirement.requiresHumanActor && params.actor.actorType !== "HUMAN") {
+      throw new ValidationError(
+        `${params.validationLevel} requires a HUMAN actor to set it (docs/VALIDATION_POLICY.md); got ${params.actor.actorType}.`,
+      );
+    }
+
+    const evidence = await opportunityRepository.listEvidence(params.id);
+    const check = checkValidationLevelRequirement(requirement, toEvidenceSummary(evidence));
+    if (!check.satisfied) {
+      throw new ValidationError(`Cannot set ${params.validationLevel}: ${check.reasons.join("; ")}`);
+    }
+
+    if (requirement.requiresChairmanApproval) {
+      const latestReview = await chairmanReviewRepository.findLatestForOpportunity(params.id);
+      if (!latestReview || latestReview.decision !== "APPROVE") {
         throw new ValidationError(
-          "Cannot set a validation level above LEVEL_0 without at least one attached Evidence record.",
+          `${params.validationLevel} requires a standing Chairman APPROVE review for this opportunity (latest decision: ${latestReview?.decision ?? "none"}).`,
         );
       }
     }

@@ -1,20 +1,13 @@
 import type { ApprovalRequest } from "@prisma/client";
-import { config } from "../config.js";
 import { approvalRepository } from "../db/repositories/approval.repository.js";
 import { APPROVAL_STATUS_TRANSITIONS, isApprovalStatus } from "../domain/approval/approval.types.js";
 import { isRiskLevel } from "../domain/risk/risk-level.js";
-import { NotFoundError, NotHumanOwnerError, SelfApprovalError, ValidationError } from "../domain/shared/errors.js";
+import { NotFoundError, SelfApprovalError, ValidationError } from "../domain/shared/errors.js";
 import { toJsonString } from "../domain/shared/json.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
-import { agentService } from "./agent.service.js";
+import { agentService, assertHumanActor, type Actor } from "./agent.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
-
-function assertHumanOwner(identity: string): void {
-  if (!config.humanOwnerIds.includes(identity)) {
-    throw new NotHumanOwnerError(identity);
-  }
-}
 
 export interface RequestApprovalParams {
   requestedByAgentId: string;
@@ -31,7 +24,7 @@ export interface RequestApprovalParams {
 export interface DecideParams {
   id: string;
   toStatus: string;
-  reviewedBy: string;
+  reviewedBy: Actor;
   decisionReason?: string | null;
 }
 
@@ -39,10 +32,10 @@ export interface DecideParams {
  * The Approval Engine backing the Human Decision Queue. The one rule
  * every path here defends: no agent may mark its own action approved
  * (Constitution §8 of the M1 brief). Enforcement is two-layered —
- * `assertHumanOwner` means only a configured Human Owner identity can
- * call decide() at all (an agent id is never in that allow-list), and
- * `SelfApprovalError` guards the case even if the two id spaces ever
- * collided.
+ * `assertHumanActor` means only a verified HUMAN identity can call
+ * decide() at all (M2_ARCHITECTURE_PROPOSAL.md §6 — an agent can never
+ * present as one), and `SelfApprovalError` guards the case even if
+ * that ever somehow didn't hold.
  */
 export const approvalService = {
   async requestApproval(params: RequestApprovalParams): Promise<ApprovalRequest> {
@@ -92,26 +85,26 @@ export const approvalService = {
     if (!isApprovalStatus(params.toStatus)) {
       throw new ValidationError(`Unknown approval status: ${params.toStatus}`);
     }
-    assertHumanOwner(params.reviewedBy);
+    assertHumanActor(params.reviewedBy);
 
     const request = await approvalService.getOrThrow(params.id);
     if (!isApprovalStatus(request.status)) {
       throw new ValidationError(`Corrupt stored status on approval request ${request.id}: ${request.status}`);
     }
-    if (params.reviewedBy === request.requestedByAgentId) {
+    if (params.reviewedBy.actorId === request.requestedByAgentId) {
       throw new SelfApprovalError();
     }
     assertTransition("ApprovalRequest", APPROVAL_STATUS_TRANSITIONS, request.status, params.toStatus);
 
     const updated = await approvalRepository.decide(params.id, {
       status: params.toStatus,
-      reviewedBy: params.reviewedBy,
+      reviewedBy: params.reviewedBy.actorId,
       decisionReason: params.decisionReason ?? null,
     });
 
     await auditService.record({
-      actorType: "HUMAN",
-      actorId: params.reviewedBy,
+      actorType: params.reviewedBy.actorType,
+      actorId: params.reviewedBy.actorId,
       action: `APPROVAL_${request.status}_TO_${params.toStatus}`,
       resourceType: request.resourceType ?? "APPROVAL_REQUEST",
       resourceId: request.resourceId ?? request.id,
@@ -130,7 +123,7 @@ export const approvalService = {
   },
 
   /** REQUEST_MORE_EVIDENCE (Constitution §16/§28): defer with a reason. */
-  requestMoreEvidence(params: { id: string; reviewedBy: string; decisionReason?: string | null }): Promise<ApprovalRequest> {
+  requestMoreEvidence(params: { id: string; reviewedBy: Actor; decisionReason?: string | null }): Promise<ApprovalRequest> {
     return approvalService.decide({
       id: params.id,
       toStatus: "DEFERRED",

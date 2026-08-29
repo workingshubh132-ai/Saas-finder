@@ -1,11 +1,13 @@
 import { Router } from "express";
 import { auditService } from "../../services/audit.service.js";
 import { asyncHandler } from "../middleware/async-handler.js";
+import { requireHuman } from "../middleware/authenticate.js";
 
 export const auditRouter = Router();
 
 auditRouter.get(
   "/",
+  requireHuman(),
   asyncHandler(async (req, res) => {
     const { resourceType, resourceId, actorId } = req.query;
     const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;

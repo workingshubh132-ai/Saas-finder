@@ -102,7 +102,7 @@ describe("evidenceService", () => {
     const verified = await evidenceService.setVerificationStatus({
       id: evidence.id,
       verificationStatus: "VERIFIED",
-      actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+      actor: HUMAN_OWNER,
     });
     expect(verified.verificationStatus).toBe("VERIFIED");
   });
@@ -122,7 +122,7 @@ describe("evidenceService", () => {
       evidenceService.setVerificationStatus({
         id: evidence.id,
         verificationStatus: "TOTALLY_TRUE",
-        actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+        actor: HUMAN_OWNER,
       }),
     ).rejects.toThrow(ValidationError);
   });
@@ -140,14 +140,14 @@ describe("evidenceService", () => {
     await evidenceService.setVerificationStatus({
       id: evidence.id,
       verificationStatus: "REJECTED",
-      actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+      actor: HUMAN_OWNER,
     });
 
     await expect(
       evidenceService.setVerificationStatus({
         id: evidence.id,
         verificationStatus: "VERIFIED",
-        actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+        actor: HUMAN_OWNER,
       }),
     ).rejects.toThrow(InvalidTransitionError);
   });

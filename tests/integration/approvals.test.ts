@@ -1,6 +1,5 @@
 import type { ApprovalRequest } from "@prisma/client";
 import { describe, expect, it } from "vitest";
-import { config } from "../../src/config.js";
 import { InvalidTransitionError, NotHumanOwnerError, SelfApprovalError } from "../../src/domain/shared/errors.js";
 import { approvalService } from "../../src/services/approval.service.js";
 import { HUMAN_OWNER, makeAgent } from "../helpers.js";
@@ -22,7 +21,7 @@ describe("approvalService", () => {
     const approved = await approvalService.decide({ id: request.id, toStatus: "APPROVED", reviewedBy: HUMAN_OWNER });
 
     expect(approved.status).toBe("APPROVED");
-    expect(approved.reviewedBy).toBe(HUMAN_OWNER);
+    expect(approved.reviewedBy).toBe(HUMAN_OWNER.actorId);
     expect(approved.reviewedAt).not.toBeNull();
   });
 
@@ -51,32 +50,35 @@ describe("approvalService", () => {
     );
   });
 
-  it("an unrecognized reviewer identity cannot decide at all", async () => {
+  it("a non-HUMAN actor cannot decide an approval at all", async () => {
     const agent = await makeAgent();
     const request = await requestSample(agent.id);
 
-    await expect(approvalService.decide({ id: request.id, toStatus: "APPROVED", reviewedBy: agent.id })).rejects.toThrow(
-      NotHumanOwnerError,
-    );
+    await expect(
+      approvalService.decide({
+        id: request.id,
+        toStatus: "APPROVED",
+        reviewedBy: { actorType: "AGENT", actorId: agent.id },
+      }),
+    ).rejects.toThrow(NotHumanOwnerError);
   });
 
-  it("the requester cannot approve its own request — even if its id somehow reached the Human Owner allow-list", async () => {
+  it("the requester cannot approve its own request, even a hand-crafted HUMAN-typed actor reusing its own id", async () => {
     const agent = await makeAgent();
     const request = await requestSample(agent.id);
 
-    // Defense-in-depth check: this simulates the should-never-happen
-    // case where the agent id space and the Human Owner allow-list
-    // collide, proving the explicit SelfApprovalError guard is real
-    // and not merely incidental to the allow-list check above.
-    config.humanOwnerIds.push(agent.id);
-    try {
-      await expect(approvalService.decide({ id: request.id, toStatus: "APPROVED", reviewedBy: agent.id })).rejects.toThrow(
-        SelfApprovalError,
-      );
-    } finally {
-      const index = config.humanOwnerIds.indexOf(agent.id);
-      if (index >= 0) config.humanOwnerIds.splice(index, 1);
-    }
+    // Defense-in-depth: simulates the should-never-happen case where a
+    // caller constructs an Actor claiming type HUMAN but carries the
+    // requesting agent's own id — proving SelfApprovalError is a real,
+    // independent guard, not merely incidental to assertHumanActor
+    // (which this input already satisfies, since actorType is HUMAN).
+    await expect(
+      approvalService.decide({
+        id: request.id,
+        toStatus: "APPROVED",
+        reviewedBy: { actorType: "HUMAN", actorId: agent.id },
+      }),
+    ).rejects.toThrow(SelfApprovalError);
   });
 
   it("REQUEST_MORE_EVIDENCE defers the request, and it can be re-queued", async () => {

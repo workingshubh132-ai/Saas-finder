@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { authorizationService } from "../../services/authorization.service.js";
 import { asyncHandler } from "../middleware/async-handler.js";
+import { requireAuth } from "../middleware/authenticate.js";
 import { validateBody } from "../middleware/validate.js";
 
 export const authorizeRouter = Router();
@@ -15,6 +16,7 @@ const authorizeSchema = z.object({
 
 authorizeRouter.post(
   "/",
+  requireAuth(),
   validateBody(authorizeSchema),
   asyncHandler(async (req, res) => {
     const decision = await authorizationService.authorize(req.body as z.infer<typeof authorizeSchema>);

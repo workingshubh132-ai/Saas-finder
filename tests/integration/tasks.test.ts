@@ -11,7 +11,7 @@ describe("taskService", () => {
       objective: "Collect pricing pages for 5 competitors",
       assignedAgentId: agent.id,
       riskLevel: "GREEN",
-      actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+      actor: HUMAN_OWNER,
     });
     expect(task.status).toBe("PENDING");
 
@@ -41,7 +41,7 @@ describe("taskService", () => {
       objective: "x",
       assignedAgentId: agent.id,
       riskLevel: "GREEN",
-      actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+      actor: HUMAN_OWNER,
     });
     await taskService.transition({ id: task.id, toStatus: "QUEUED", actor: { actorType: "SYSTEM", actorId: "scheduler" } });
     await taskService.transition({ id: task.id, toStatus: "RUNNING", actor: { actorType: "AGENT", actorId: agent.id } });
@@ -63,7 +63,7 @@ describe("taskService", () => {
       objective: "x",
       assignedAgentId: agent.id,
       riskLevel: "GREEN",
-      actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+      actor: HUMAN_OWNER,
     });
 
     await expect(
@@ -78,12 +78,12 @@ describe("taskService", () => {
       objective: "x",
       assignedAgentId: agent.id,
       riskLevel: "GREEN",
-      actor: { actorType: "HUMAN", actorId: HUMAN_OWNER },
+      actor: HUMAN_OWNER,
     });
-    await taskService.transition({ id: task.id, toStatus: "CANCELLED", actor: { actorType: "HUMAN", actorId: HUMAN_OWNER } });
+    await taskService.transition({ id: task.id, toStatus: "CANCELLED", actor: HUMAN_OWNER });
 
     await expect(
-      taskService.transition({ id: task.id, toStatus: "QUEUED", actor: { actorType: "HUMAN", actorId: HUMAN_OWNER } }),
+      taskService.transition({ id: task.id, toStatus: "QUEUED", actor: HUMAN_OWNER }),
     ).rejects.toThrow(InvalidTransitionError);
   });
 });
