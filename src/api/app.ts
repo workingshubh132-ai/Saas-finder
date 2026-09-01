@@ -3,13 +3,19 @@ import { agentExecutionsRouter } from "./routes/agent-executions.routes.js";
 import { agentsRouter } from "./routes/agents.routes.js";
 import { auditRouter } from "./routes/audit.routes.js";
 import { authorizeRouter } from "./routes/authorize.routes.js";
+import { competitorsRouter } from "./routes/competitors.routes.js";
 import { decisionsRouter } from "./routes/decisions.routes.js";
 import { evidenceRouter } from "./routes/evidence.routes.js";
 import { eventsRouter } from "./routes/events.routes.js";
 import { identitiesRouter } from "./routes/identities.routes.js";
 import { opportunitiesRouter } from "./routes/opportunities.routes.js";
+import { problemsRouter } from "./routes/problems.routes.js";
+import { researchCyclesRouter } from "./routes/research-cycles.routes.js";
+import { researchQueueRouter } from "./routes/research-queue.routes.js";
 import { researchRouter } from "./routes/research.routes.js";
 import { researchSignalsRouter } from "./routes/research-signals.routes.js";
+import { signalClustersRouter } from "./routes/signal-clusters.routes.js";
+import { signalsRouter } from "./routes/signals.routes.js";
 import { tasksRouter } from "./routes/tasks.routes.js";
 import { errorHandler } from "./middleware/error-handler.js";
 
@@ -31,6 +37,13 @@ export function createApp(): Express {
   app.use("/api/research-signals", researchSignalsRouter);
   app.use("/api/research", researchRouter);
   app.use("/api/agent-executions", agentExecutionsRouter);
+  // M3 — docs/M3_ARCHITECTURE_PROPOSAL.md §17.
+  app.use("/api/signals", signalsRouter);
+  app.use("/api/signal-clusters", signalClustersRouter);
+  app.use("/api/problems", problemsRouter);
+  app.use("/api/competitors", competitorsRouter);
+  app.use("/api/research-cycles", researchCyclesRouter);
+  app.use("/api/research-queue", researchQueueRouter);
 
   app.use(errorHandler);
 

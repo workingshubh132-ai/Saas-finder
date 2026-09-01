@@ -81,6 +81,10 @@ describe("HTTP API", () => {
           economics: 0.5,
           risk: 0.4,
           evidenceQuality: 0.4,
+          marketSize: 0.5,
+          frequency: 0.5,
+          evidenceIndependence: 0.3,
+          timing: 0.5,
         },
         approvalRequest: {
           action: "ADVANCE_TO_VALIDATION",

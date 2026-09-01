@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { evidenceGapRepository } from "../../db/repositories/evidence-gap.repository.js";
 import { AuthorizationDeniedError } from "../../domain/shared/errors.js";
 import { approvalService } from "../../services/approval.service.js";
 import { chairmanService } from "../../services/chairman.service.js";
@@ -83,6 +84,10 @@ const dimensionsSchema = z.object({
   economics: z.number().min(0).max(1),
   risk: z.number().min(0).max(1),
   evidenceQuality: z.number().min(0).max(1),
+  marketSize: z.number().min(0).max(1),
+  frequency: z.number().min(0).max(1),
+  evidenceIndependence: z.number().min(0).max(1),
+  timing: z.number().min(0).max(1),
 });
 
 const scoreOpportunitySchema = z.object({ dimensions: dimensionsSchema, scoredBy: z.string().min(1) });
@@ -191,5 +196,14 @@ opportunitiesRouter.post(
       resourceId: requireParam(req, "id"),
     });
     res.status(201).json(request);
+  }),
+);
+
+/** Known unknowns/assumptions and the ranked next-best-research-question (M3 brief Part 31). */
+opportunitiesRouter.get(
+  "/:id/evidence-gaps",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await evidenceGapRepository.listForOpportunity(requireParam(req, "id")));
   }),
 );

@@ -36,7 +36,22 @@ describe("chairmanService", () => {
     await opportunityService.scoreOpportunity({
       opportunityId: opportunity.id,
       scoredBy: agent.id,
-      dimensions: { pain: 0.8, demand: 0.8, willingnessToPay: 0.7, reachability: 0.6, retention: 0.6, differentiation: 0.5, buildability: 0.7, economics: 0.6, risk: 0.2, evidenceQuality: 0.85 },
+      dimensions: {
+        pain: 0.8,
+        demand: 0.8,
+        willingnessToPay: 0.7,
+        reachability: 0.6,
+        retention: 0.6,
+        differentiation: 0.5,
+        buildability: 0.7,
+        economics: 0.6,
+        risk: 0.2,
+        evidenceQuality: 0.85,
+        marketSize: 0.6,
+        frequency: 0.6,
+        evidenceIndependence: 0.5,
+        timing: 0.5,
+      },
     });
 
     const result = await chairmanService.review({ opportunityId: opportunity.id, reviewedBy: authActor() });
@@ -79,7 +94,22 @@ describe("chairmanService", () => {
     await opportunityService.scoreOpportunity({
       opportunityId: strong.id,
       scoredBy: agent.id,
-      dimensions: { pain: 0.9, demand: 0.9, willingnessToPay: 0.9, reachability: 0.8, retention: 0.8, differentiation: 0.7, buildability: 0.8, economics: 0.8, risk: 0.1, evidenceQuality: 0.9 },
+      dimensions: {
+        pain: 0.9,
+        demand: 0.9,
+        willingnessToPay: 0.9,
+        reachability: 0.8,
+        retention: 0.8,
+        differentiation: 0.7,
+        buildability: 0.8,
+        economics: 0.8,
+        risk: 0.1,
+        evidenceQuality: 0.9,
+        marketSize: 0.8,
+        frequency: 0.8,
+        evidenceIndependence: 0.7,
+        timing: 0.7,
+      },
     });
 
     const strongReview = await chairmanService.review({ opportunityId: strong.id, reviewedBy: authActor() });

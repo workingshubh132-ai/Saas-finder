@@ -14,11 +14,13 @@ const runResearchSchema = z.object({
 });
 
 /**
- * The real, agent-executed research pipeline (M2 brief Parts 10-13,
- * demonstration in Part 33) — distinct from POST /api/research-signals
- * (M1's manual/direct intake for already-structured signals, kept
- * as-is for that use). Human-Owner-only to start: the Constitution's
- * "Human -> CEO Task -> Research Agent" chain begins with a human.
+ * The real, agent-executed signal-collection run (M2 brief Parts
+ * 10-13; M3 brief Part 1 — collection only, see
+ * docs/M3_ARCHITECTURE_PROPOSAL.md §1/§9 for why synthesis moved
+ * downstream) — distinct from POST /api/research-signals (M1's
+ * manual/direct intake for already-structured signals, kept as-is for
+ * that use). Human-Owner-only to start: the Constitution's "Human ->
+ * CEO Task -> Research Agent" chain begins with a human.
  */
 researchRouter.post(
   "/",

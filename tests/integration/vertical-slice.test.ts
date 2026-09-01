@@ -53,6 +53,10 @@ describe("M1 vertical slice: signal -> opportunity -> evidence -> score -> appro
         economics: 0.6,
         risk: 0.35,
         evidenceQuality: 0.55,
+        marketSize: 0.5,
+        frequency: 0.5,
+        evidenceIndependence: 0.4,
+        timing: 0.5,
       },
       approvalRequest: {
         action: "ADVANCE_TO_VALIDATION",

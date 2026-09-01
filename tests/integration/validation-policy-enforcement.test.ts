@@ -96,7 +96,22 @@ describe("opportunityService.setValidationLevel — full policy enforcement", ()
     await opportunityService.scoreOpportunity({
       opportunityId: opportunity.id,
       scoredBy: agent.id,
-      dimensions: { pain: 0.9, demand: 0.9, willingnessToPay: 0.9, reachability: 0.8, retention: 0.8, differentiation: 0.7, buildability: 0.8, economics: 0.8, risk: 0.1, evidenceQuality: 0.9 },
+      dimensions: {
+        pain: 0.9,
+        demand: 0.9,
+        willingnessToPay: 0.9,
+        reachability: 0.8,
+        retention: 0.8,
+        differentiation: 0.7,
+        buildability: 0.8,
+        economics: 0.8,
+        risk: 0.1,
+        evidenceQuality: 0.9,
+        marketSize: 0.8,
+        frequency: 0.8,
+        evidenceIndependence: 0.7,
+        timing: 0.7,
+      },
     });
     const review = await chairmanService.review({ opportunityId: opportunity.id, reviewedBy: authActor() });
     expect(review.decision.decision).toBe("APPROVE");

@@ -55,6 +55,7 @@ model Agent {
   tasks             Task[]            @relation("AssignedTasks")
   approvalRequests  ApprovalRequest[]
   evidenceCollected Evidence[]
+  signalsCollected  Signal[]
   identities        Identity[]
   executions        AgentExecution[]
 
@@ -174,6 +175,12 @@ model Evidence {
   collectedByAgent   Agent    @relation(fields: [collectedByAgentId], references: [id], onDelete: Restrict)
   collectedAt        DateTime @default(now()) @map("collected_at")
 
+  /// M3 — set when this Evidence was formalized from a Signal
+  /// (docs/M3_ARCHITECTURE_PROPOSAL.md §8). Null for evidence collected
+  /// through the M1/M2 manual/direct paths, which stay valid.
+  signalId String? @map("signal_id")
+  signal   Signal? @relation(fields: [signalId], references: [id], onDelete: SetNull)
+
   /// Trustworthiness of the source (LOW/MEDIUM/HIGH).
   reliability String
   /// Collector's confidence that the claim is true, 0..1.
@@ -188,9 +195,11 @@ model Evidence {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   opportunityLinks OpportunityEvidence[]
+  resolvedGaps     EvidenceGap[]
 
   @@index([collectedByAgentId])
   @@index([sourceType])
+  @@index([signalId])
   @@map("evidence")
 }
 
@@ -213,17 +222,30 @@ model Opportunity {
 
   validationLevel String @default("LEVEL_0") @map("validation_level")
 
+  /// M3 — traceability root: which Problem this candidate was
+  /// generated from (docs/M3_ARCHITECTURE_PROPOSAL.md §9). Null for
+  /// opportunities created through the M1/M2 manual/direct paths.
+  problemId     String?  @map("problem_id")
+  sourceProblem Problem? @relation(fields: [problemId], references: [id], onDelete: SetNull)
+
+  /// M3 — denormalized for cheap reads; recomputed whenever
+  /// evidenceGapService.analyze() runs (docs/M3_ARCHITECTURE_PROPOSAL.md §14).
+  nextBestResearchQuestion String? @map("next_best_research_question")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   /// JSON-encoded free-form metadata.
   metadata String?
 
-  evidenceLinks   OpportunityEvidence[]
-  scoreRecords    OpportunityScoreRecord[]
-  chairmanReviews ChairmanReview[]
+  evidenceLinks      OpportunityEvidence[]
+  scoreRecords       OpportunityScoreRecord[]
+  chairmanReviews    ChairmanReview[]
+  evidenceGaps       EvidenceGap[]
+  researchQueueItems ResearchQueueItem[]
 
   @@index([status])
+  @@index([problemId])
   @@map("opportunities")
 }
 
@@ -256,6 +278,17 @@ model OpportunityScoreRecord {
   opportunityScore Float  @map("opportunity_score")
   confidenceScore  Float  @map("confidence_score")
   scoredBy         String @map("scored_by")
+
+  /// M3 — a THIRD, independent axis alongside score/confidence, never
+  /// conflated with either (Constitution §12; M3 brief Part 21-22;
+  /// docs/M3_ARCHITECTURE_PROPOSAL.md §11). Nullable: pre-M3 score
+  /// records, and any scoring path that hasn't run kill-risk analysis,
+  /// simply have none yet — never defaulted to a fabricated 0.
+  killRiskScore      Float?  @map("kill_risk_score")
+  /// JSON-encoded per-dimension kill-risk inputs (see kill-risk-scorer.ts).
+  killRiskDimensions String? @map("kill_risk_dimensions")
+  /// JSON-encoded string[] — every dimension that crossed the "high risk" threshold, explained.
+  killRiskReasons    String? @map("kill_risk_reasons")
 
   createdAt DateTime @default(now()) @map("created_at")
 
@@ -363,7 +396,8 @@ model Identity {
   expiresAt           DateTime? @map("expires_at")
   lastUsedAt          DateTime? @map("last_used_at")
 
-  executionsStarted AgentExecution[]
+  executionsStarted     AgentExecution[]
+  researchCyclesStarted ResearchCycle[]
 
   @@index([agentId])
   @@index([status])
@@ -382,6 +416,12 @@ model AgentExecution {
 
   taskId String? @map("task_id")
   task   Task?   @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  /// M3 — set when this execution ran as a step inside a bounded
+  /// ResearchCycle rather than a standalone POST /api/research call
+  /// (docs/M3_ARCHITECTURE_PROPOSAL.md §22).
+  researchCycleId String?        @map("research_cycle_id")
+  researchCycle   ResearchCycle? @relation(fields: [researchCycleId], references: [id], onDelete: SetNull)
 
   status String @default("CREATED")
 
@@ -469,4 +509,276 @@ model ChairmanReview {
 
   @@index([opportunityId])
   @@map("chairman_reviews")
+}
+
+// ---------------------------------------------------------------------------
+// M3 — Opportunity Intelligence Engine
+// (docs/M3_ARCHITECTURE_PROPOSAL.md)
+// ---------------------------------------------------------------------------
+
+/// The raw, low-commitment record of "something a source returned" —
+/// distinct from Evidence (§2, §8). A Signal only becomes Evidence
+/// once it's actually used to back a specific Problem/Opportunity claim.
+model Signal {
+  id String @id @default(cuid())
+
+  /// ResearchSource id (e.g. "hacker_news", "stack_exchange").
+  source          String
+  /// Shares Evidence's own sourceType vocabulary — see domain/signal/signal.types.ts.
+  sourceType      String @map("source_type")
+  sourceReference String @map("source_reference")
+
+  title   String
+  content String
+
+  /// Which agent's tool call collected this signal (Constitution §25 —
+  /// every significant agent action must be attributable). Mirrors
+  /// Evidence.collectedByAgentId exactly.
+  collectedByAgentId String @map("collected_by_agent_id")
+  collectedByAgent   Agent  @relation(fields: [collectedByAgentId], references: [id], onDelete: Restrict)
+
+  publishedAt   DateTime? @map("published_at")
+  collectedAt   DateTime  @default(now()) @map("collected_at")
+  /// Opaque source-specific author label (e.g. a username) — never
+  /// resolved to a real-world identity.
+  authorContext String?   @map("author_context")
+  language      String    @default("en")
+
+  /// sha256(title + content) — the exact-duplicate key (§5).
+  contentHash    String  @map("content_hash")
+  /// Adapter-computed key identifying "same thread/post/author
+  /// context" so independent-source counting is a real query, not a
+  /// narrative claim (§2, §6, Part 13).
+  sourceGroupKey String? @map("source_group_key")
+
+  /// JSON-encoded source-specific extras (points, tags, answer count...).
+  metadata String?
+
+  /// Seeded from source-reliability-policy.ts; may be refined once
+  /// promoted to Evidence.
+  reliability  String
+  /// Deterministic 0..1 quality assessment (§10) — specificity,
+  /// recency, originality; never a model call.
+  qualityScore Float  @default(0) @map("quality_score")
+
+  status String @default("NEW")
+
+  clusterId String?        @map("cluster_id")
+  cluster   SignalCluster? @relation(fields: [clusterId], references: [id], onDelete: SetNull)
+
+  duplicateOfSignalId String?  @map("duplicate_of_signal_id")
+  duplicateOfSignal   Signal?  @relation("SignalDuplicates", fields: [duplicateOfSignalId], references: [id], onDelete: SetNull)
+  duplicatesOfThis    Signal[] @relation("SignalDuplicates")
+  /// Human-readable explanation of why this was marked a duplicate —
+  /// every dedup decision must be explainable (Part 9).
+  duplicateReason     String?  @map("duplicate_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  evidence Evidence[]
+
+  @@index([status])
+  @@index([source])
+  @@index([contentHash])
+  @@index([sourceGroupKey])
+  @@index([clusterId])
+  @@index([collectedByAgentId])
+  @@map("signals")
+}
+
+/// Groups related signals about a common underlying problem/theme (§6).
+model SignalCluster {
+  id String @id @default(cuid())
+
+  name    String
+  summary String
+
+  signalCount            Int   @default(0) @map("signal_count")
+  /// COUNT(DISTINCT sourceGroupKey) across non-duplicate member
+  /// signals — never conflated with signalCount (Part 13: "100 posts
+  /// != 100 independent customers").
+  independentSourceCount Int   @default(0) @map("independent_source_count")
+  confidence             Float @default(0)
+
+  status String @default("ACTIVE")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  signals  Signal[]
+  problems Problem[]
+
+  @@index([status])
+  @@map("signal_clusters")
+}
+
+/// A structured, extracted recurring problem — the M3 brief's literal
+/// field list (Part 11). Distinguishes "I don't like this product"
+/// from "a recurring, expensive workflow problem affecting many
+/// customers" (§7).
+model Problem {
+  id String @id @default(cuid())
+
+  clusterId String        @map("cluster_id")
+  cluster   SignalCluster @relation(fields: [clusterId], references: [id], onDelete: Restrict)
+
+  statement              String
+  customerSegment        String @map("customer_segment")
+  workflow               String
+  pain                   String
+  frequency              String
+  currentSolution        String @map("current_solution")
+  dissatisfaction        String
+  urgency                String
+  willingnessToPaySignal String @map("willingness_to_pay_signal")
+
+  /// Clamped by the service to the cluster's real, non-duplicate
+  /// signal count — never trusted directly from model output (§7).
+  evidenceCount Int   @map("evidence_count")
+  confidence    Float
+
+  status String @default("CANDIDATE")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  opportunities          Opportunity[]
+  competitorObservations CompetitorObservation[]
+
+  @@index([status])
+  @@index([clusterId])
+  @@map("problems")
+}
+
+/// A canonical competitor record, reusable across opportunities/problems.
+model Competitor {
+  id String @id @default(cuid())
+
+  name        String
+  url         String?
+  description String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  observations CompetitorObservation[]
+
+  @@map("competitors")
+}
+
+/// One timestamped, opportunity-specific note about a competitor —
+/// pricing/positioning/reviews/strengths/weaknesses as actually found
+/// by the Competitor Analyst, never fabricated (Part 17).
+model CompetitorObservation {
+  id String @id @default(cuid())
+
+  competitorId String     @map("competitor_id")
+  competitor   Competitor @relation(fields: [competitorId], references: [id], onDelete: Restrict)
+
+  problemId String  @map("problem_id")
+  problem   Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  type   String
+  detail String
+
+  sourceReference String? @map("source_reference")
+
+  observedAt DateTime @default(now()) @map("observed_at")
+
+  @@index([competitorId])
+  @@index([problemId])
+  @@map("competitor_observations")
+}
+
+/// A known unknown/assumption about an Opportunity, and the single
+/// question that would resolve it (Part 31 — the evidence-gap engine).
+model EvidenceGap {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  /// Free label (e.g. "willingness_to_pay") — see domain/evidence-gap/evidence-gap.types.ts.
+  dimension   String
+  status      String @default("UNKNOWN")
+  description String
+
+  suggestedResearchQuestion String @map("suggested_research_question")
+  /// Deterministic ranking input: how much resolving this gap would
+  /// matter (weight in the score) x how unresolved it currently is.
+  impactScore               Float  @map("impact_score")
+
+  resolvedAt           DateTime? @map("resolved_at")
+  resolvedByEvidenceId String?   @map("resolved_by_evidence_id")
+  resolvedByEvidence   Evidence? @relation(fields: [resolvedByEvidenceId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  queueItems ResearchQueueItem[]
+
+  @@index([opportunityId])
+  @@index([status])
+  @@map("evidence_gaps")
+}
+
+/// A bounded, budgeted unit of orchestrated research work — the same
+/// entity carries both "research cycle" (Part 28) and "operating
+/// window" (Part 29) lifecycles (§16).
+model ResearchCycle {
+  id String @id @default(cuid())
+
+  objective String
+  status    String @default("SCHEDULED")
+
+  startedByIdentityId String   @map("started_by_identity_id")
+  startedByIdentity   Identity @relation(fields: [startedByIdentityId], references: [id], onDelete: Restrict)
+
+  maxDurationMs Int   @map("max_duration_ms")
+  maxSignals    Int   @map("max_signals")
+  maxToolCalls  Int   @map("max_tool_calls")
+  maxModelCalls Int   @map("max_model_calls")
+  maxCostUsd    Float @map("max_cost_usd")
+
+  signalsCollected       Int    @default(0) @map("signals_collected")
+  toolCallCount          Int    @default(0) @map("tool_call_count")
+  modelCallCount         Int    @default(0) @map("model_call_count")
+  opportunitiesGenerated Int    @default(0) @map("opportunities_generated")
+  estimatedCostUsd       Float? @map("estimated_cost_usd")
+
+  /// Set when status = STOPPED: which budget was exhausted (Part 38).
+  stoppedReason String? @map("stopped_reason")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  executions AgentExecution[]
+
+  @@index([status])
+  @@map("research_cycles")
+}
+
+/// The prioritized research queue (Part 30) — what should a cycle work
+/// on next, which is not always "the highest-scoring opportunity."
+model ResearchQueueItem {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  evidenceGapId String?      @map("evidence_gap_id")
+  evidenceGap   EvidenceGap? @relation(fields: [evidenceGapId], references: [id], onDelete: SetNull)
+
+  kind          String
+  /// Documented weighted formula — see research-queue.service.ts.
+  priorityScore Float  @map("priority_score")
+  reason        String
+  status        String @default("PENDING")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([opportunityId])
+  @@map("research_queue_items")
 }

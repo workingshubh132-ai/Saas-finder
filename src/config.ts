@@ -1,7 +1,7 @@
 import "dotenv/config";
 
 export type ModelProviderMode = "development" | "anthropic";
-export type ResearchToolMode = "development" | "hn_algolia";
+export type ResearchToolMode = "development" | "live";
 
 export const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -17,9 +17,10 @@ export const config = {
   anthropicModel: process.env.ANTHROPIC_MODEL ?? "claude-3-5-haiku-20241022",
 
   /**
-   * "development" (default) uses a labeled fixture tool with no
-   * network dependency. "hn_algolia" calls the real, keyless Hacker
-   * News Algolia Search API. See docs/TOOL_SYSTEM.md.
+   * "development" (default) uses labeled fixture sources with no
+   * network dependency. "live" calls the real, keyless research
+   * sources (Hacker News Algolia, Stack Exchange). See
+   * docs/SOURCE_ADAPTERS.md.
    */
   researchToolMode: (process.env.RESEARCH_TOOL_MODE ?? "development") as ResearchToolMode,
 } as const;
@@ -30,9 +31,9 @@ export function assertConfigValid(): void {
       `MODEL_PROVIDER_MODE must be "development" or "anthropic" (got "${config.modelProviderMode}"). Refusing to start.`,
     );
   }
-  if (config.researchToolMode !== "development" && config.researchToolMode !== "hn_algolia") {
+  if (config.researchToolMode !== "development" && config.researchToolMode !== "live") {
     throw new Error(
-      `RESEARCH_TOOL_MODE must be "development" or "hn_algolia" (got "${config.researchToolMode}"). Refusing to start.`,
+      `RESEARCH_TOOL_MODE must be "development" or "live" (got "${config.researchToolMode}"). Refusing to start.`,
     );
   }
   if (config.modelProviderMode === "anthropic" && !config.anthropicApiKey) {

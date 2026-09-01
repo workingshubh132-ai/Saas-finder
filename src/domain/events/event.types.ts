@@ -14,6 +14,18 @@ export const DOMAIN_EVENT_TYPES = [
   "APPROVAL_REQUESTED",
   "APPROVAL_APPROVED",
   "APPROVAL_REJECTED",
+  // M3 — docs/M3_ARCHITECTURE_PROPOSAL.md §16, §22.
+  "SIGNAL_CLUSTER_CREATED",
+  "PROBLEM_EXTRACTED",
+  "COMPETITOR_ANALYSIS_COMPLETED",
+  "RESEARCH_CYCLE_STARTED",
+  "RESEARCH_CYCLE_COMPLETED",
+  /** Fired by the opportunity-feedback event-bus subscriber, not by
+   *  approvalService itself, so a future learning process reads one
+   *  self-contained snapshot (decision + score + confidence + kill
+   *  risk + Chairman decision) instead of joining four tables
+   *  (M3 brief Part 32/33; docs/M3_ARCHITECTURE_PROPOSAL.md §16). */
+  "OPPORTUNITY_DECISION_RECORDED",
 ] as const;
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
 

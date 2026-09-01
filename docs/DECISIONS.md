@@ -436,3 +436,205 @@ immediately readable than an abstraction covering three call sites —
 consistent with the standing instruction not to introduce an
 abstraction before it's earned its keep. Worth revisiting if a fourth
 or fifth route needs the same shape of check.
+
+---
+
+## M3 decisions
+
+## 26. Signal, Evidence, Problem, Opportunity stay four separate entities — and Evidence sits downstream of Problem, not upstream
+
+The M3 brief's Part 1 pipeline diagram and Part 3's simplified
+five-node illustration order Evidence and Problem differently (Part 1:
+Problem Candidate → Multi-Source Evidence → Opportunity; Part 3:
+Signal → Evidence → Problem → Opportunity → Decision). Read Part 1 as
+authoritative — it's the detailed, literal pipeline; Part 3 is making
+a qualitative point ("these are different concepts," not a second,
+conflicting literal ordering). Concretely: a `Signal` is cheap and raw;
+it becomes `Evidence` only once it's actually used to back a specific
+Problem's claim, at the point that Problem is being promoted toward an
+Opportunity (`opportunity-analyst.service.ts`'s `promoteSignalsToEvidence`,
+`OPPORTUNITY_INTELLIGENCE.md` §8) — never automatically, matching Part
+3's real requirement ("a single signal should not automatically become
+an opportunity") without needing Part 1 and Part 3 to describe a
+literal identical sequence.
+
+## 27. `ResearchSource` split from `Tool` — a new, narrower interface, not a `Tool` subtype
+
+**Considered:** giving each source its own `Tool` implementation
+directly (what M2's `HackerNewsSearchTool` already did). **Rejected:**
+would duplicate permission/risk/budget-related boilerplate per source
+the way M2's one-tool design already showed the cost of once a second
+source was needed. `ResearchSource` (`src/sources/research-source.ts`)
+knows only how to search one system; `SourceSearchTool`
+(`src/tools/source-search.tool.ts`) is the one generic bridge to
+`Tool` — adding a new source is implementing one interface and one
+registration line, touching neither the runtime nor any existing tool.
+See `SOURCE_ADAPTERS.md`.
+
+## 28. Two real sources; Reddit deliberately not built even as unauthenticated
+
+Hacker News (carried over from M2) and Stack Exchange — both public,
+keyless, explicitly built for programmatic search, satisfying "quality
+over quantity" (M3 brief Part 6/45) without padding. Reddit was
+seriously considered and rejected specifically because its only
+keyless path (the legacy `.json` endpoints) is not a legitimate
+substitute for automated use at real volume under Reddit's current API
+terms — building it would mean shipping code that's unsafe to actually
+run, which is worse than not building it. See `SOURCE_ADAPTERS.md` for
+the full reasoning and what a founder would need to do to add it for
+real (register an OAuth app).
+
+## 29. Deterministic token-overlap similarity, not embeddings, for both dedup and clustering
+
+**Considered:** an embedding-based nearest-neighbor approach for both
+near-duplicate detection and clustering. **Rejected for M3:** the M3
+brief explicitly defers "complex vector memory" (Part 33); a plain
+Jaccard token-overlap score (`domain/signal/similarity.ts`) is cheap,
+requires no new dependency or model call, and — critically — is fully
+explainable: a similarity *number between two specific texts* is
+directly inspectable in a `duplicateReason` string, where a
+nearest-neighbor result in embedding space is not without additional
+tooling this milestone doesn't need yet. Cost accepted: no stemming,
+so near-synonymous phrasing ("invoice" vs "invoices") isn't credited —
+a known, documented limitation (`SIGNAL_MODEL.md`), not a hidden one;
+it also shaped how test fixtures had to be constructed (`tests/integration/problem-analyst.test.ts`'s
+`raw()` comment explains the fixed-core-plus-unique-filler-tokens
+pattern this required).
+
+## 30. Independence tracking (`sourceGroupKey`) is real and tested, but unexercised by either live source today — said plainly, not hidden
+
+Both registered sources search for standalone stories/questions, so
+neither adapter currently has a genuine "these results share a thread"
+concept to report — `sourceGroupKey` is `null` from both today, and
+`independentSourceCount` is effectively `signalCount` in current
+practice (every null-grouped signal counts as its own independent
+source). The mechanism itself is real, not decorative: it's exercised
+directly with synthetic grouped data in `tests/unit/cluster-confidence.test.ts`,
+and it's exactly what a future comment-level source (e.g. multiple
+replies in one Reddit thread) would populate without any schema
+change. Recorded here rather than only in a code comment, matching the
+same honesty standard as M2's `AWAITING_HUMAN`-has-one-producer note.
+
+## 31. All four new agents run through `agentRuntimeService` — including the three that make zero tool calls
+
+**Considered:** giving Problem Analyst, Market Analyst, and
+Opportunity Analyst a lightweight, Chairman-style treatment (a plain
+service function calling `ModelProvider.complete()` directly, no
+`AgentExecution` row) since none of them use `handle.callTool()`.
+**Rejected:** the M3 brief's Part 24 explicitly asks every new agent
+to have real "permissions, tools, risk level, budget, termination
+conditions" — a bespoke lightweight service doesn't naturally carry
+budget/termination semantics the way `agentRuntimeService` already
+does for free, and every one of these four is meant to be a real,
+independently-accountable `Agent` registry entry (unlike Chairman,
+which the Constitution's own hierarchy treats as a distinct
+governance role sitting above the CEO's department agents, not one of
+them — `CHAIRMAN.md`). `agentRuntimeService.run()` fully supports
+"zero tool calls, one or two model calls" as a legitimate pipeline
+shape; using it uniformly costs nothing and buys consistent
+`AgentExecution` telemetry (execution id, timing, retryCount,
+errorCode) for every agent, not just the ones that happen to touch a
+tool.
+
+## 32. Kill-risk fields extend `OpportunityScoreRecord`; no new table
+
+Same reasoning as M1's `OpportunityScoreRecord` itself
+(`DECISIONS.md` #6): kill-risk is produced by the same synthesis step
+that produces the attractiveness score and needs the same
+point-in-time history — splitting them into two separately-timestamped
+tables would let them drift out of sync (a kill-risk re-assessment
+without a matching score re-assessment, or vice versa) for no benefit.
+Score, confidence, and kill risk remain three independently-read,
+never-conflated numbers at the read layer even though two of the three
+live in one table.
+
+## 33. Evidence-gap impact ranking: uniform dimension weight, extremity-adjusted
+
+**Considered:** weighting each of the 14 scoring dimensions
+differently by "how much it usually matters." **Rejected for M3:**
+no real usage data exists yet to justify differential weights, and a
+plausible-sounding but uncalibrated weighting scheme would be worse
+than an honestly-uniform one (1/14 each). The one refinement kept —
+ranking an assumed dimension higher when its assigned value sits near
+an extreme (0 or 1) rather than a neutral 0.5 — is justified
+independently of any calibration: an unverified extreme assumption has
+more room to be wrong in a way that changes the outcome. See
+`OPPORTUNITY_INTELLIGENCE.md`.
+
+## 34. Research queue priority can go negative — never floored to 0
+
+`domain/research-queue/priority.ts`'s formula subtracts both a
+kill-risk term and a cost term from a positive information-gain/score
+term. A sufficiently costly, high-risk, low-scoring item legitimately
+scores below zero. **Considered:** clamping to `[0, 1]` like every
+other score in this codebase. **Rejected:** clamping would make every
+genuinely-not-worth-doing item indistinguishable from a merely
+marginal one at the floor, destroying exactly the ranking information
+the queue exists to provide. `research_queue_items.priority_score` has
+no CHECK-constraint bound in the migration for the same reason
+(`evidence_gaps.impact_score`, by contrast, *is* bounded 0..1, since
+that formula is designed to stay in range by construction — a
+deliberate, considered difference between the two, not an oversight).
+
+## 35. `ResearchCycle` carries both "research cycle" and "operating window" as one lifecycle
+
+**Considered:** a separate `OperatingWindow` entity wrapping one-or-more
+`ResearchCycle` rows, matching the M3 brief's Part 28/29 naming two
+concepts. **Rejected:** in this implementation a cycle *is* the
+bounded unit of work an operating window would represent — there is no
+scenario in M3 where a window contains more than one cycle or a cycle
+outlives its window. Two entities would mean keeping two lifecycles in
+sync for a distinction that doesn't exist yet. If a future milestone
+genuinely needs a window spanning multiple cycles (e.g. a whole
+weekend's worth), splitting them apart then is a schema addition, not
+a rewrite — `ResearchCycle` doesn't assume it's the only cycle that
+will ever run.
+
+## 36. No `opportunity_problems` or `problem_signals` join tables
+
+Both relationships are modeled as direct foreign keys instead
+(`Opportunity.problemId`, `Problem.clusterId`) — see
+`docs/M3_ARCHITECTURE_PROPOSAL.md` §16 for the full reasoning. The
+degree of freedom this design actually needs (one Problem can spawn
+more than one Opportunity framing over time) is exactly what a
+one-directional FK already supports; a join table would additionally
+allow the reverse (one Opportunity spanning multiple Problems), which
+nothing in the brief asks for and which would complicate the
+traceability walk (`OPPORTUNITY_INTELLIGENCE.md` §"Traceability") for
+a capability not needed.
+
+## 37. Real bugs this build caught before they shipped — recorded, not smoothed over
+
+Consistent with this codebase's own transparency principle
+(Constitution §29), three genuine defects were found and fixed during
+M3 development via smoke-testing and the automated suite, not
+theorized away:
+
+- The `events` table's SQLite `CHECK` constraint on `type` still
+  listed only M1's literal event names — adding six new
+  `DOMAIN_EVENT_TYPES` entries in code without a matching migration
+  meant `RESEARCH_CYCLE_STARTED` failed at the database layer the
+  first time a research cycle actually ran. Fixed with an additive
+  migration (`20260901120000_m3_event_types`) rebuilding the table
+  with the full constraint list. This is exactly what the "fail-closed
+  enums, in the database too" pattern (`SECURITY.md`) is *for* — it
+  caught a real application-code drift, not a hypothetical one.
+- `ResearchCycle.objective` was written once at creation from the
+  caller's request and never updated when the cycle actually resolved
+  a different objective from the research queue (`RESEARCH_SCHEDULING.md`)
+  — the persisted record would have silently misrepresented what a
+  cycle actually researched. Fixed by resolving the objective before
+  the `RUNNING` transition and persisting the resolved value.
+- `Evidence.signalId` — the column the idempotent
+  signal-to-evidence-promotion check depends on — was being written
+  into `metadata` instead of the real column, silently defeating its
+  own purpose (every re-generation would have created duplicate
+  Evidence rows instead of reusing them). Fixed by threading `signalId`
+  through `CollectEvidenceParams`/`CreateEvidenceInput` as a first-class
+  parameter.
+
+All three were caught before being reported as working — by a
+throwaway smoke-test script exercising the real orchestrator end to
+end (the first two) and by the automated integration suite (the
+third) — not discovered later. Recorded here per the standing
+instruction to document what was found, not only what shipped clean.

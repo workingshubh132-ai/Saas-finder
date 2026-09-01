@@ -19,6 +19,10 @@ const dimensionsSchema = z.object({
   economics: z.number().min(0).max(1),
   risk: z.number().min(0).max(1),
   evidenceQuality: z.number().min(0).max(1),
+  marketSize: z.number().min(0).max(1),
+  frequency: z.number().min(0).max(1),
+  evidenceIndependence: z.number().min(0).max(1),
+  timing: z.number().min(0).max(1),
 });
 
 const researchSignalSchema = z.object({

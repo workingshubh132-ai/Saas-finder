@@ -10,6 +10,7 @@ export interface CreateEvidenceInput {
   reliability: string;
   confidence: number;
   metadata: string | null;
+  signalId?: string | null;
 }
 
 export const evidenceRepository = {
@@ -23,6 +24,12 @@ export const evidenceRepository = {
 
   findManyByIds(ids: string[]): Promise<Evidence[]> {
     return prisma.evidence.findMany({ where: { id: { in: ids } } });
+  },
+
+  /** M3 — idempotent signal->Evidence promotion lookup (docs/M3_ARCHITECTURE_PROPOSAL.md §8):
+   *  a signal already promoted once is reused via OpportunityEvidence, never re-promoted into a duplicate row. */
+  findBySignalId(signalId: string): Promise<Evidence | null> {
+    return prisma.evidence.findFirst({ where: { signalId } });
   },
 
   updateVerificationStatus(id: string, verificationStatus: string): Promise<Evidence> {

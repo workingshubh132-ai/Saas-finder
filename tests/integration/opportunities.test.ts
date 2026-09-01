@@ -16,6 +16,10 @@ const dimensions: OpportunityScoreDimensions = {
   economics: 0.6,
   risk: 0.3,
   evidenceQuality: 0.5,
+  marketSize: 0.5,
+  frequency: 0.5,
+  evidenceIndependence: 0.4,
+  timing: 0.5,
 };
 
 describe("opportunityService", () => {

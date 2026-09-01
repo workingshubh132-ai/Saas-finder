@@ -7,6 +7,8 @@ export interface CreateOpportunityInput {
   targetCustomer: string;
   description: string;
   metadata: string | null;
+  /** M3 — traceability root (docs/M3_ARCHITECTURE_PROPOSAL.md §9). */
+  problemId?: string | null;
 }
 
 export interface UpdateOpportunityInput {
@@ -14,6 +16,7 @@ export interface UpdateOpportunityInput {
   validationLevel?: string;
   opportunityScore?: number | null;
   confidenceScore?: number | null;
+  nextBestResearchQuestion?: string | null;
 }
 
 export interface AddScoreRecordInput {
@@ -22,6 +25,10 @@ export interface AddScoreRecordInput {
   opportunityScore: number;
   confidenceScore: number;
   scoredBy: string;
+  /** M3 — a third, independent axis (docs/M3_ARCHITECTURE_PROPOSAL.md §11). */
+  killRiskScore?: number | null;
+  killRiskDimensions?: string | null;
+  killRiskReasons?: string | null;
 }
 
 export const opportunityRepository = {

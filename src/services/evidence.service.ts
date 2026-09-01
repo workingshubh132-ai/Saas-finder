@@ -22,6 +22,11 @@ export interface CollectEvidenceParams {
   reliability: string;
   confidence: number;
   metadata?: Record<string, unknown>;
+  /** M3 — set when this Evidence is promoted from a Signal
+   *  (docs/M3_ARCHITECTURE_PROPOSAL.md §8); null for M1/M2 direct
+   *  collection. A real FK column, not metadata, so
+   *  evidenceRepository.findBySignalId() (idempotent promotion) works. */
+  signalId?: string | null;
 }
 
 function assertConfidence(confidence: number): void {
@@ -57,6 +62,7 @@ export const evidenceService = {
       reliability: params.reliability,
       confidence: params.confidence,
       metadata: params.metadata ? toJsonString(params.metadata) : null,
+      signalId: params.signalId ?? null,
     });
 
     await auditService.record({

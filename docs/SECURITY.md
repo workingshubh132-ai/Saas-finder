@@ -4,11 +4,18 @@
 > model, kept verbatim as a historical record — nothing in it has been
 > deleted or rewritten. M2 closed the "no authentication" gap it
 > documents and added a real agent-execution attack surface; **see the
-> "M2 — Agent Execution + Governance Brain" section at the end of this
-> file** for what changed, what's new, and the 12-category threat
-> review the M2 brief requires. Sections below marked *(superseded in
-> M2 — see the M2 section)* describe an M1 mechanism M2 replaced;
-> they're kept for history, not as current behavior.
+> "M2 — Agent Execution + Governance Brain" section** for what changed,
+> what's new, and the 12-category threat review the M2 brief requires.
+> Sections below marked *(superseded in M2 — see the M2 section)*
+> describe an M1 mechanism M2 replaced; they're kept for history, not
+> as current behavior.
+>
+> **M3 note:** M3 adds a real external-content pipeline — multiple
+> research sources, four new reasoning agents consuming that content,
+> and an autonomous-ish orchestration loop (`researchCycleService`).
+> **See the "M3 — Opportunity Intelligence Engine" section at the very
+> end of this file** for the 12-category threat review the M3 brief
+> requires. Nothing in the M1 or M2 sections is superseded by M3.
 
 ## Threat model for M1
 
@@ -402,3 +409,163 @@ continuously through a run, not just at its start.
 production dependencies after adding M2's code (no new production
 dependency was introduced — `AnthropicModelProvider` and
 `HackerNewsSearchTool` both use the global `fetch`, not an SDK).
+
+---
+
+## M3 — Opportunity Intelligence Engine
+
+Everything below is new in M3. Additive to the M2 section above: M3's
+real new surface is a genuine external-content pipeline (multiple
+research sources feeding four new reasoning agents) and an
+orchestration loop that runs many agent executions per call
+(`researchCycleService`). No new authentication mechanism, no new
+permission, no new risk level — every new tool call is still
+`READ_WEB`/GREEN, still passes through the unmodified `authorize()`
+Guardian check (`AGENT_RUNTIME.md`, `SOURCE_ADAPTERS.md`).
+
+### Treat all external research content as untrusted data — a real, enforced boundary, not just a policy statement
+
+Every prompt in M3 keeps the same structural separation M2 already
+established: `systemPrompt` is always a hardcoded, named constant
+(`PLAN_SYSTEM_PROMPT`, `PROBLEM_ANALYST_SYSTEM_PROMPT`,
+`COMPETITOR_ANALYST_SYSTEM_PROMPT`, `MARKET_ANALYST_SYSTEM_PROMPT`,
+`OPPORTUNITY_ANALYST_SYSTEM_PROMPT`, `CHAIRMAN_SYSTEM_PROMPT`) — never
+dynamically built from signal/tool/source content — while every piece
+of external content (signal titles/content, search-tool JSON output,
+competitor observations) flows only through the `messages` array's
+`user`-role content. This is directly verifiable, not just asserted:
+`grep -n "systemPrompt:" src/services/*.ts` shows every one of the six
+agent/Chairman prompts assigned from a named constant, none built by
+string-concatenating request-time content. A model is therefore never
+handed external content in a position where it could be mistaken for
+an instruction from VentureForge itself.
+
+### The 12-category review (M3 brief Part 36)
+
+1. **Prompt injection through research content.** Mitigated by the
+   trust-boundary separation above. *Remaining risk:* within the
+   `messages` content itself, a sufficiently adversarial signal/search
+   result could still try to influence a real model's *word choice*
+   inside its structured JSON output (e.g. a misleading `claim` or
+   `reasoning` string) — the schema still constrains the *shape* of
+   what comes back (Zod-validated, same `completeWithValidation`
+   pattern as M2), but not the semantic content of a free-text field.
+   Every such field lands as `UNVERIFIED` Evidence or an unpromoted
+   Problem, still subject to Chairman review and a human decision —
+   the blast radius stays "a misleading claim a human has to catch,"
+   never "the system takes an unauthorized action." No
+   content-based instruction-detection filter is implemented; flagged
+   for M4, same as M2's equivalent item.
+2. **Malicious URLs.** `sourceReference` values from every source are
+   stored as opaque strings and never re-fetched, never rendered as
+   HTML, never used to construct a further outbound request — carried
+   over unchanged from M2's identical finding. Only
+   `HackerNewsSource`/`StackExchangeSource` themselves call `fetch`,
+   and only against their own fixed, hardcoded endpoint constants —
+   no tool accepts a caller-suppliable destination URL, so there is no
+   SSRF vector through any M3 tool.
+3. **Malicious search results.** Every result is Zod-validated
+   (`searchToolOutputSchema`) before it reaches any agent; a
+   malformed/oversized field is rejected at that boundary, not passed
+   through. Content length isn't hard-capped beyond what the source
+   API itself returns, but every downstream consumer (signal quality
+   scoring, model prompts) treats it as plain text, never executed or
+   templated.
+4. **Poisoned evidence.** Nothing is trusted as ground truth anywhere
+   in the pipeline: every signal becomes `UNVERIFIED` evidence at best
+   (`SIGNAL_MODEL.md`), scoring dimensions are Zod-bounded 0..1 and
+   independently reviewed by the Chairman (`OPPORTUNITY_INTELLIGENCE.md`),
+   and `evidenceCount`/independence figures are computed from real
+   database rows, never trusted from a model's own self-report
+   (`problem-analyst.service.ts`'s clamping, §7 of `SIGNAL_MODEL.md`).
+   A single poisoned signal can distort one cluster's confidence at
+   most — it cannot itself create an Opportunity, approve anything, or
+   spend anything.
+5. **Instruction injection.** Same mitigation and same remaining risk
+   as #1 — this is the same threat from the model-input angle rather
+   than the human-facing-claim angle. The structural separation is
+   what prevents injected content from being *treated* as an
+   instruction by the runtime itself (no tool call, no budget change,
+   no permission change can result from prompt content, since none of
+   those are ever derived from model output — they're fixed code
+   paths).
+6. **Data exfiltration.** No M3 tool can write anywhere — every
+   registered source is read-only search. No agent has
+   `SEND_EXTERNAL_MESSAGE`, `CREATE_EXTERNAL_ACCOUNT`, or any
+   write-capable permission. `authorContext` (a source's own author
+   label) is stored as opaque text and never resolved to, combined
+   with, or cross-referenced against any other personal-data source —
+   there is nothing in M3's code path that could turn collected public
+   post text into an exfiltration channel for anything sensitive,
+   because nothing sensitive (secrets, other users' data) is ever
+   placed where a research agent's prompt or tool output could reach
+   it in the first place.
+7. **Tool abuse.** Every source is read-only, rate-limited
+   (`SOURCE_ADAPTERS.md`), and Guardian-gated on every single call, not
+   cached (`AGENT_RUNTIME.md`). *Remaining risk:* none identified for
+   the two current sources; any future write-capable tool needs the
+   mid-execution-approval-suspension mechanism this milestone still
+   defers before it could safely exist.
+8. **Rate-limit abuse (against the external source, or by the system
+   against itself).** `checkRateLimit()` enforces each source's own
+   declared `requestsPerMinute` before every call
+   (`SOURCE_ADAPTERS.md`) — this protects the *external* service from
+   VentureForge, not just the reverse. Internally, the Research
+   Agent's own bounded pipeline (≤3 tool calls per execution,
+   round-robined across sources — `research-agent.service.ts`) and the
+   cycle-level `maxToolCalls` ceiling (`RESEARCH_SCHEDULING.md`) both
+   independently cap how many calls one research effort can make
+   regardless of the rate limiter.
+9. **Resource exhaustion.** Two full budget layers
+   (`RESEARCH_SCHEDULING.md`): the unchanged per-`AgentExecution`
+   budget, and the new per-`ResearchCycle` budget bounding the *sum*
+   across every execution a cycle spawns, checked before every stage.
+   A bounded comparison window (200 recent signals, never a full-table
+   scan) keeps deduplication/clustering cost bounded regardless of how
+   large the `signals` table grows over time (`SIGNAL_MODEL.md`,
+   M3 brief Part 45's N×M×K warning).
+10. **Duplicate signal flooding.** The three-level deduplication
+    pipeline (`SIGNAL_MODEL.md`) exists specifically to prevent this —
+    a flood of near-identical reposts collapses to one `PROCESSED`
+    signal plus many explicitly-linked `DUPLICATE` rows, none of which
+    count toward a cluster's `signalCount`/`independentSourceCount` or
+    ever reach a model call. Proven directly:
+    `tests/integration/signal.test.ts`'s "never inflates a duplicate's
+    quality score" test and `signal-clustering.test.ts`'s duplicate
+    rejection test.
+11. **Source spoofing.** A signal's `source` field is always the
+    literal `id` of the `ResearchSource` that actually produced it
+    (set by `research-agent.service.ts`, never caller-suppliable
+    through any API — there is no endpoint that lets a caller assert
+    an arbitrary `source` value for a signal). Reliability is seeded
+    from the real, code-defined `SOURCE_RELIABILITY` policy table
+    keyed by that same id (`domain/evidence/source-reliability-policy.ts`)
+    and fails closed to `LOW` for any id not in the table — a
+    hypothetical spoofed or newly-added source id can never claim more
+    trust than the most conservative default.
+12. **Model manipulation.** Every structured output is Zod-validated
+    with one bounded corrective retry, then a hard failure
+    (`completeWithValidation`, unchanged from M2) — a model cannot
+    return an out-of-schema value, an out-of-range score, or an
+    invalid enum and have it silently accepted anywhere in M3.
+    `assertUnitInterval`-style checks (`opportunity-scorer.ts`,
+    `kill-risk-scorer.ts`) independently re-validate every numeric
+    dimension at the service layer too, not just at the schema
+    boundary — defense in depth against a model finding a way past the
+    first check.
+
+### Least privilege, reaffirmed for the four new agents
+
+Problem Analyst, Market Analyst, and Opportunity Analyst hold **zero**
+permission grants in every test and the demo — they make no tool
+calls, so `READ_WEB` was never granted to them, and nothing in their
+code path calls `handle.callTool()`, so there is nothing to
+authorize. Only Competitor Analyst is granted `READ_WEB`, matching
+exactly what it needs and nothing more.
+
+### Dependency posture (M3)
+
+`npm audit --omit=dev` still reports **zero** vulnerabilities in
+production dependencies after adding M3's code — no new production
+dependency was introduced (`HackerNewsSource`/`StackExchangeSource`
+both use the global `fetch`, matching M2's own no-SDK precedent).

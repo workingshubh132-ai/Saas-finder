@@ -13,8 +13,10 @@ import type { Actor } from "./agent.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
 import { DeterministicOpportunityScorer, type OpportunityScoreDimensions, type OpportunityScorer } from "./opportunity-scorer.js";
+import { DeterministicKillRiskScorer, type KillRiskDimensions, type KillRiskScorer } from "./kill-risk-scorer.js";
 
 const defaultScorer: OpportunityScorer = new DeterministicOpportunityScorer();
+const defaultKillRiskScorer: KillRiskScorer = new DeterministicKillRiskScorer();
 
 function toEvidenceSummary(evidence: readonly Evidence[]): EvidenceSummaryItem[] {
   const summary: EvidenceSummaryItem[] = [];
@@ -36,6 +38,8 @@ export interface CreateOpportunityParams {
   description: string;
   metadata?: Record<string, unknown>;
   discoveredBy: Actor;
+  /** M3 — traceability root (docs/M3_ARCHITECTURE_PROPOSAL.md §9). */
+  problemId?: string | null;
 }
 
 export interface ScoreOpportunityParams {
@@ -43,6 +47,11 @@ export interface ScoreOpportunityParams {
   dimensions: OpportunityScoreDimensions;
   scoredBy: string;
   scorer?: OpportunityScorer;
+  /** M3 — optional: a caller that hasn't assessed kill risk yet (e.g.
+   *  M1/M2 callers) simply omits this; the score record's kill-risk
+   *  fields stay null rather than a fabricated value. */
+  killRiskDimensions?: KillRiskDimensions;
+  killRiskScorer?: KillRiskScorer;
 }
 
 export const opportunityService = {
@@ -53,6 +62,7 @@ export const opportunityService = {
       targetCustomer: params.targetCustomer,
       description: params.description,
       metadata: params.metadata ? toJsonString(params.metadata) : null,
+      problemId: params.problemId ?? null,
     });
 
     await auditService.record({
@@ -108,12 +118,21 @@ export const opportunityService = {
     const scorer = params.scorer ?? defaultScorer;
     const result = scorer.score({ dimensions: params.dimensions, scoredBy: params.scoredBy });
 
+    let killRisk: { killRiskScore: number; killRiskReasons: string[] } | null = null;
+    if (params.killRiskDimensions) {
+      const killRiskScorer = params.killRiskScorer ?? defaultKillRiskScorer;
+      killRisk = killRiskScorer.score(params.killRiskDimensions);
+    }
+
     await opportunityRepository.addScoreRecord({
       opportunityId: params.opportunityId,
       dimensions: toJsonString(params.dimensions),
       opportunityScore: result.opportunityScore,
       confidenceScore: result.confidenceScore,
       scoredBy: params.scoredBy,
+      killRiskScore: killRisk?.killRiskScore ?? null,
+      killRiskDimensions: params.killRiskDimensions ? toJsonString(params.killRiskDimensions) : null,
+      killRiskReasons: killRisk ? toJsonString(killRisk.killRiskReasons) : null,
     });
 
     const updated = await opportunityRepository.update(params.opportunityId, {

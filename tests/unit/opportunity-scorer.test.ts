@@ -13,6 +13,10 @@ const strong: OpportunityScoreDimensions = {
   economics: 0.8,
   risk: 0.1,
   evidenceQuality: 0.9,
+  marketSize: 0.8,
+  frequency: 0.8,
+  evidenceIndependence: 0.7,
+  timing: 0.7,
 };
 
 const weak: OpportunityScoreDimensions = {
@@ -26,6 +30,10 @@ const weak: OpportunityScoreDimensions = {
   economics: 0.2,
   risk: 0.9,
   evidenceQuality: 0.2,
+  marketSize: 0.2,
+  frequency: 0.1,
+  evidenceIndependence: 0.1,
+  timing: 0.2,
 };
 
 describe("DeterministicOpportunityScorer", () => {
@@ -45,9 +53,9 @@ describe("DeterministicOpportunityScorer", () => {
     expect(strongResult.opportunityScore).toBeGreaterThan(weakResult.opportunityScore);
   });
 
-  it("confidence score tracks evidence quality directly", () => {
+  it("confidence score is the average of evidence quality and evidence independence (M3)", () => {
     const result = scorer.score({ dimensions: strong, scoredBy: "test" });
-    expect(result.confidenceScore).toBe(strong.evidenceQuality);
+    expect(result.confidenceScore).toBeCloseTo((strong.evidenceQuality + strong.evidenceIndependence) / 2);
   });
 
   it("discounts opportunity score by risk", () => {

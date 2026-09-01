@@ -23,14 +23,23 @@ async function resetDatabase(): Promise<void> {
   await prisma.auditLog.deleteMany();
   await prisma.event.deleteMany();
   await prisma.memory.deleteMany();
+  // M3 leaf tables first (FK-safe order — docs/M3_ARCHITECTURE_PROPOSAL.md §16).
+  await prisma.researchQueueItem.deleteMany();
+  await prisma.evidenceGap.deleteMany();
+  await prisma.competitorObservation.deleteMany();
+  await prisma.competitor.deleteMany();
   await prisma.toolExecution.deleteMany();
   await prisma.agentExecution.deleteMany();
+  await prisma.researchCycle.deleteMany();
   await prisma.chairmanReview.deleteMany();
   await prisma.opportunityScoreRecord.deleteMany();
   await prisma.opportunityEvidence.deleteMany();
   await prisma.approvalRequest.deleteMany();
   await prisma.evidence.deleteMany();
   await prisma.opportunity.deleteMany();
+  await prisma.problem.deleteMany();
+  await prisma.signal.deleteMany();
+  await prisma.signalCluster.deleteMany();
   await prisma.task.deleteMany();
   await prisma.agentPermission.deleteMany();
   await prisma.identity.deleteMany();
