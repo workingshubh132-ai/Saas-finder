@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { z } from "zod";
+import { ceoRecommendationRepository } from "../../db/repositories/ceo-recommendation.repository.js";
+import { claimRepository } from "../../db/repositories/claim.repository.js";
+import { decisionCycleRepository } from "../../db/repositories/decision-cycle.repository.js";
+import { decisionRecordRepository } from "../../db/repositories/decision-record.repository.js";
 import { evidenceGapRepository } from "../../db/repositories/evidence-gap.repository.js";
+import { investmentMemoRepository } from "../../db/repositories/investment-memo.repository.js";
 import { AuthorizationDeniedError } from "../../domain/shared/errors.js";
 import { approvalService } from "../../services/approval.service.js";
 import { chairmanService } from "../../services/chairman.service.js";
@@ -205,5 +210,47 @@ opportunitiesRouter.get(
   requireAuth(),
   asyncHandler(async (req, res) => {
     res.json(await evidenceGapRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+// --- M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §22. ---
+
+opportunitiesRouter.get(
+  "/:id/claims",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await claimRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/ceo-recommendations",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await ceoRecommendationRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/investment-memos",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await investmentMemoRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/decision-records",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await decisionRecordRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/decision-cycles",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await decisionCycleRepository.list({ opportunityId: requireParam(req, "id") }));
   }),
 );

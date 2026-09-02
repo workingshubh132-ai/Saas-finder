@@ -1,4 +1,5 @@
 import type { TransitionTable } from "../shared/state-machine.js";
+import { CYCLE_STATUSES, CYCLE_STATUS_TRANSITIONS, isCycleStatus, type CycleStatus } from "../shared/cycle-lifecycle.js";
 
 /**
  * M3 brief Part 29 (Operating Window) folded into one lifecycle with
@@ -8,30 +9,17 @@ import type { TransitionTable } from "../shared/state-machine.js";
  * lacks the grant it needs to even start (researchCycleService).
  * STOPPED is where a budget-exhausted cycle lands, with every row
  * already committed left intact (Part 38) — never rolled back.
+ *
+ * M4 (docs/M4_ARCHITECTURE_PROPOSAL.md §21) needed the identical
+ * lifecycle for `DecisionCycle`, so this is now a thin re-export of
+ * the shared `domain/shared/cycle-lifecycle.ts` constant rather than
+ * its own copy — a change to the shared shape applies to both cycle
+ * types automatically. Names kept identical to before the refactor;
+ * no caller of this file changes.
  */
-export const RESEARCH_CYCLE_STATUSES = [
-  "SCHEDULED",
-  "RUNNING",
-  "PAUSED",
-  "STOPPED",
-  "AWAITING_HUMAN",
-  "COMPLETED",
-  "FAILED",
-  "CANCELLED",
-] as const;
-export type ResearchCycleStatus = (typeof RESEARCH_CYCLE_STATUSES)[number];
+export const RESEARCH_CYCLE_STATUSES = CYCLE_STATUSES;
+export type ResearchCycleStatus = CycleStatus;
 
-export function isResearchCycleStatus(value: string): value is ResearchCycleStatus {
-  return (RESEARCH_CYCLE_STATUSES as readonly string[]).includes(value);
-}
+export const isResearchCycleStatus: (value: string) => value is ResearchCycleStatus = isCycleStatus;
 
-export const RESEARCH_CYCLE_STATUS_TRANSITIONS: TransitionTable<ResearchCycleStatus> = {
-  SCHEDULED: ["RUNNING", "AWAITING_HUMAN", "CANCELLED"],
-  AWAITING_HUMAN: ["SCHEDULED", "RUNNING", "CANCELLED"],
-  RUNNING: ["PAUSED", "STOPPED", "COMPLETED", "FAILED", "CANCELLED"],
-  PAUSED: ["RUNNING", "STOPPED", "CANCELLED"],
-  STOPPED: [],
-  COMPLETED: [],
-  FAILED: [],
-  CANCELLED: [],
-};
+export const RESEARCH_CYCLE_STATUS_TRANSITIONS: TransitionTable<ResearchCycleStatus> = CYCLE_STATUS_TRANSITIONS;

@@ -569,3 +569,125 @@ exactly what it needs and nothing more.
 production dependencies after adding M3's code — no new production
 dependency was introduced (`HackerNewsSource`/`StackExchangeSource`
 both use the global `fetch`, matching M2's own no-SDK precedent).
+
+---
+
+## M4 — Decision Intelligence Engine
+
+Everything below is new in M4. Additive to the M3 section above: M4's
+real new surface is two more reasoning agents (Evidence Validator,
+CEO) and a second orchestration loop (`decisionCycleService`) layered
+on top of the unchanged `researchCycleService`/`agentRuntimeService`/
+Guardian chain — no new authentication mechanism, no new permission
+value, no new risk level. Full rationale in
+`docs/M4_ARCHITECTURE_PROPOSAL.md` §24.
+
+### A new trust-boundary category: "UNTRUSTED ANALYTICAL OUTPUT"
+
+M2/M3 established "external research content is untrusted data." M4
+adds a second, distinct category: the CEO's and Evidence Validator's
+own reasoning is **untrusted analytical output from another AI
+component** — persisted, reviewed, and surfaced to the Human Owner,
+but never concatenated into another agent's `systemPrompt` and never
+executed as an instruction by any downstream service. Verified
+directly: `grep -n "systemPrompt:" src/services/*.ts` still shows
+every prompt (now eight: the six from M3 plus
+`EVIDENCE_VALIDATOR_SYSTEM_PROMPT`/`CEO_SYSTEM_PROMPT`) assigned from a
+named constant, none built by concatenating claim/report/recommendation
+text. `CHAIRMAN_SYSTEM_PROMPT`'s extended clause (`chairman.service.ts`,
+§19) is the concrete enforcement of this for the one place a CEO
+recommendation is handed to another reasoning component at all: the
+Chairman is explicitly instructed to independently verify the CEO's
+claim citations against the real claims/reports provided, not take
+its characterization on faith, and to ignore any instruction-like text
+inside the CEO's own reasoning field.
+
+### The 12-category review (M4 brief Part 35)
+
+1. **Prompt injection** (via evidence/signal content reaching the
+   Evidence Validator or CEO). Same structural mitigation as M3's
+   equivalent item — external content only ever appears in the
+   `messages` array, never the `systemPrompt`. *Remaining risk:*
+   identical in kind to M3's — a sufficiently adversarial evidence
+   item could still influence a real model's *word choice* inside its
+   own structured JSON (e.g. a misleading `reasoning` string), never
+   the shape of what comes back (Zod-validated) or any executable
+   effect.
+2. **Malicious evidence.** The Validator's deterministic input factors
+   (reliability/directness/specificity/recency/independence — all
+   computed by code, never asserted by the evidence's own text, §8)
+   mean no amount of persuasive wording in an evidence item's `claim`
+   field can inflate its own quality score. A `ValidationReport`
+   status still requires corroborating structure, not just confident
+   phrasing.
+3. **Poisoned research** (a source adapter returning crafted counter-evidence
+   results during Validator search). Unchanged M3 mitigation — same
+   `SourceSearchTool`/Guardian/rate-limit path, no new trust granted
+   because the caller is an adversarially-framed agent.
+4. **CEO manipulation.** Structurally bounded to zero tool calls
+   (`CEO_REASONING_BUDGET.maxToolCalls: 0`) and read-only reasoning
+   over already-persisted, already-Zod-validated data (§12) — even a
+   fully "successful" injection against the CEO's model call can only
+   produce a `CeoRecommendation` row, which is itself Chairman-reviewed
+   (§19) and never auto-applied (§13, §20; `decisionCycleService`
+   itself never calls `approvalService.decide` or
+   `opportunityService.transition`).
+5. **Chairman manipulation via CEO output.** §19's explicit prompt
+   clause above, plus the dev-fixture's own verification logic
+   (`chairman.service.ts`'s `unverifiableCitations` check): a CEO
+   recommendation citing a claim id that doesn't actually belong to
+   the opportunity is flagged as an objection, not trusted.
+6. **Evidence tampering.** No update/delete path exists on `Evidence`,
+   `ClaimEvidence`, or `ValidationReport` — confirmed by the
+   repositories exposing `create`/`find*`/`list*` only (`claim-evidence.repository.ts`,
+   `validation-report.repository.ts`). A correction is always a new
+   row (§4, §6).
+7. **Decision tampering.** `CeoRecommendation`, `InvestmentMemo`, and
+   `DecisionRecord` are insert-only from the application layer — same
+   confirmation as above, no repository exposes an update/delete
+   method for any of the three.
+8. **Model-output injection.** Every Validator/CEO/extended-Chairman
+   response goes through `completeWithValidation` against a Zod schema
+   exactly like every M2/M3 structured call — never parsed, trusted, or
+   executed raw.
+9. **Privilege escalation.** No M4 code path grants a permission — the
+   Evidence Validator's `READ_WEB` and the CEO's zero grants are both
+   assigned exactly once, by a HUMAN actor, through the unmodified
+   `agentService.grantPermission` (§23).
+10. **Self-approval.** Structural, not policy: `decisionRecordService.applyHumanDecision`
+    additionally calls `assertHumanActor` on its own caller even though
+    the `ApprovalRequest` it operates on was necessarily already
+    human-decided to reach `APPROVED`/`REJECTED` in the first place —
+    defense in depth, matching `approvalService.decide`'s own
+    `SelfApprovalError` guard, which M4 does not modify or bypass.
+11. **Resource exhaustion.** `DecisionCycleBudget`'s six ceilings
+    (`maxClaims`, `maxValidatorSearches`, `maxModelCalls`,
+    `maxResearchTasks`, `maxCeoPlanningSteps`, `maxDurationMs`),
+    checked before each claim's validation and before the CEO step,
+    exactly mirroring `ResearchCycleBudget`'s own "check before, not
+    after" discipline (§25).
+12. **External-source poisoning.** Unchanged M3 mitigation — the
+    Evidence Validator's counter-evidence searches carry no elevated
+    trust merely because the caller is adversarially framed; same
+    Guardian/rate-limit/Zod path as every other `READ_WEB` call.
+
+### Agent permissions, reaffirmed for the two new agents
+
+The Evidence Validator holds exactly `READ_WEB` (`GREEN`), matching
+the Research/Competitor Analysts. **The CEO holds zero permission
+grants in every test and the demo** — confirmed the same way M3's
+zero-grant analysts were confirmed: nothing in `ceo-reasoning.service.ts`
+calls `handle.callTool()`, so there is nothing to authorize, and
+`CEO_REASONING_BUDGET.maxToolCalls: 0` makes a tool call impossible
+regardless. `APPROVE_SELF` is not, and has never been, a grantable
+`Permission` in this system — self-approval is prevented structurally
+(`SelfApprovalError` + `assertHumanActor`, both unmodified by M4), a
+strictly stronger guarantee than a revocable grant.
+
+### Dependency posture (M4)
+
+`npm audit --omit=dev` still reports **zero** vulnerabilities in
+production dependencies after adding M4's code — no new production
+dependency was introduced (the Evidence Validator's counter-evidence
+search reuses the exact same `SourceSearchTool`/`ResearchSource`
+instances M3 already registers; nothing new calls out to any service).

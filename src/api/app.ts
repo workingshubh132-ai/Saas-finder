@@ -3,11 +3,16 @@ import { agentExecutionsRouter } from "./routes/agent-executions.routes.js";
 import { agentsRouter } from "./routes/agents.routes.js";
 import { auditRouter } from "./routes/audit.routes.js";
 import { authorizeRouter } from "./routes/authorize.routes.js";
+import { ceoRecommendationsRouter } from "./routes/ceo-recommendations.routes.js";
+import { claimsRouter } from "./routes/claims.routes.js";
 import { competitorsRouter } from "./routes/competitors.routes.js";
+import { decisionCyclesRouter } from "./routes/decision-cycles.routes.js";
+import { decisionRecordsRouter } from "./routes/decision-records.routes.js";
 import { decisionsRouter } from "./routes/decisions.routes.js";
 import { evidenceRouter } from "./routes/evidence.routes.js";
 import { eventsRouter } from "./routes/events.routes.js";
 import { identitiesRouter } from "./routes/identities.routes.js";
+import { investmentMemosRouter } from "./routes/investment-memos.routes.js";
 import { opportunitiesRouter } from "./routes/opportunities.routes.js";
 import { problemsRouter } from "./routes/problems.routes.js";
 import { researchCyclesRouter } from "./routes/research-cycles.routes.js";
@@ -44,6 +49,12 @@ export function createApp(): Express {
   app.use("/api/competitors", competitorsRouter);
   app.use("/api/research-cycles", researchCyclesRouter);
   app.use("/api/research-queue", researchQueueRouter);
+  // M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §22.
+  app.use("/api/claims", claimsRouter);
+  app.use("/api/decision-cycles", decisionCyclesRouter);
+  app.use("/api/ceo-recommendations", ceoRecommendationsRouter);
+  app.use("/api/investment-memos", investmentMemosRouter);
+  app.use("/api/decision-records", decisionRecordsRouter);
 
   app.use(errorHandler);
 

@@ -37,14 +37,22 @@ export const researchQueueService = {
         killRiskScore: latestKillRisk,
         estimatedResearchCost: DEFAULT_ESTIMATED_COST,
       });
+
+      // M4 — a gap re-analyzed across decision cycles (evidenceGapService.analyzeClaim)
+      // refreshes its existing active queue item in place rather than
+      // duplicating it; M3's original one-gap-created-once-per-opportunity
+      // flow never hit this path, so it never needed the guard.
+      const existingItem = await researchQueueRepository.findActiveByEvidenceGapId(gap.id);
       items.push(
-        await researchQueueRepository.create({
-          opportunityId,
-          evidenceGapId: gap.id,
-          kind: "RESOLVE_EVIDENCE_GAP",
-          priorityScore,
-          reason: gap.suggestedResearchQuestion,
-        }),
+        existingItem
+          ? await researchQueueRepository.updatePriority(existingItem.id, priorityScore, gap.suggestedResearchQuestion)
+          : await researchQueueRepository.create({
+              opportunityId,
+              evidenceGapId: gap.id,
+              kind: "RESOLVE_EVIDENCE_GAP",
+              priorityScore,
+              reason: gap.suggestedResearchQuestion,
+            }),
       );
     }
     return items;

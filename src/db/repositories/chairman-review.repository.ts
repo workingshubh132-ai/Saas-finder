@@ -18,6 +18,12 @@ export const chairmanReviewRepository = {
     return prisma.chairmanReview.create({ data: input });
   },
 
+  /** M4 — investment-memo.service.ts needs to look up a specific,
+   *  already-referenced review by id, not just "the latest" (docs/M4_ARCHITECTURE_PROPOSAL.md §17). */
+  findById(id: string): Promise<ChairmanReview | null> {
+    return prisma.chairmanReview.findUnique({ where: { id } });
+  },
+
   findLatestForOpportunity(opportunityId: string): Promise<ChairmanReview | null> {
     return prisma.chairmanReview.findFirst({ where: { opportunityId }, orderBy: { createdAt: "desc" } });
   },

@@ -638,3 +638,87 @@ throwaway smoke-test script exercising the real orchestrator end to
 end (the first two) and by the automated integration suite (the
 third) — not discovered later. Recorded here per the standing
 instruction to document what was found, not only what shipped clean.
+
+## 38. `researchQueueService.populateForOpportunity` needed an idempotency guard M3 never required
+
+M3 only ever called `populateForOpportunity` once per opportunity
+(right after `opportunityAnalystService.run()` created it), so its
+unconditional `researchQueueRepository.create()` per unresolved gap
+never had a chance to duplicate anything. M4's `evidenceGapService.analyzeClaim`
+updates a claim-linked gap **in place** across many decision cycles
+(§15) — calling the unmodified `populateForOpportunity` again after
+that would have created a second `ResearchQueueItem` pointing at the
+same, now-updated gap every single cycle. Fixed by adding
+`researchQueueRepository.findActiveByEvidenceGapId` and refreshing an
+existing PENDING/IN_PROGRESS item's priority in place instead of
+creating a duplicate — caught by a smoke test running a second
+decision cycle on the same opportunity and asserting the queue-item
+count didn't double (`docs/M4_ARCHITECTURE_PROPOSAL.md` §16 records
+this as a "real latent gap in the M3 function," not a new one M4
+introduced).
+
+## 39. Claim-level evidence gaps are never auto-resolved
+
+Considered auto-resolving a claim's `EvidenceGap` once its status
+reaches `SUPPORTED`/`CONTRADICTED`. Rejected: a Claim's validation
+status is a complete digraph with no terminal state (§5) — new
+evidence can move a `SUPPORTED` claim back to `WEAK` next cycle without
+the claim itself ever "closing." Auto-resolving the gap on first
+`SUPPORTED` would stop tracking a claim the moment it looked good once,
+exactly the kind of premature closure the Expected Information Gain
+formula's own non-zero `uncertaintyFactor` for `SUPPORTED`/`CONTRADICTED`
+(0.3, not 0 — domain/claim/eig.ts) already argues against. Resolution
+stays an explicit human/CEO call; the formula's own low-but-nonzero
+score is what keeps a well-supported claim's gap sorted near the
+bottom of the queue instead of hidden entirely.
+
+## 40. `ValidationReport.confidence` and `Claim.confidence` are deliberately two different numbers
+
+The former is the Evidence Validator's own direct self-assessment
+(part of its Zod-validated structured output, analogous to
+`ChairmanReview.confidence`); the latter is the separate, deterministic
+value `claim-confidence.service.ts` computes from the report's
+*factors* (reliability/specificity/recency/independence/corroboration-count/
+contradiction-count — §11), not from the report's own confidence field
+directly. Considered collapsing them into one column. Rejected: the
+whole point of §11's formula is that Claim confidence must stay
+reproducible from stored factors, auditable independent of whatever
+number a model happened to self-report — conflating the two would mean
+a future prompt change to the Validator could silently change claim
+confidence with no corresponding formula change to explain why.
+
+## 41. WTP payment-intent detection matches evidence text, not the claim's own statement — and strips the claim-type phrase first
+
+The Chairman's dev-fixture worked example (§19: flag a SUPPORTED
+willingness-to-pay claim whose only support lacks real payment-intent
+language) initially checked `Claim.statement` itself, which is often a
+negative assertion ("No explicit willingness-to-pay signal found") —
+"pay" appearing inside the words "willingness-to-pay" made the naive
+check false-negative on the exact case it was meant to catch. A second
+bug in the same feature: the Evidence Validator's own counter-evidence
+search uses a claim's statement as its query, and the development
+source's fixture results echo that query back ("Discussion mentioning
+'<query>' ..."), reintroducing the same "willingness-to-pay" substring
+into a piece of *evidence* text even after the check was moved to look
+at evidence instead of the claim. Fixed by (1) checking the claim's
+actual `SUPPORTING`-classified evidence text via the latest
+`ValidationReport`, not the claim's own restated summary, and (2)
+stripping the `willingness[-\s]?to[-\s]?pay` phrase from evidence text
+before testing for real payment-intent words. Both caught by a smoke
+test seeding a real "I wish this existed" (no purchase intent) evidence
+item and asserting the objection actually fires.
+
+## 42. No event-bus subscriber for `OPPORTUNITY_DECISION_RECORDED`
+
+M3's original doc comment for this reserved-but-unfired event type
+described a future "opportunity-feedback event-bus subscriber." A
+repo-wide grep confirmed `eventBus.subscribe()` had zero callers
+anywhere in M1-M3. M4 fires the event directly from the one call site
+that needs it (`decisionRecordService.applyHumanDecision`) rather than
+registering a subscriber for it. **Considered:** building the
+subscriber to match the original framing literally. **Rejected:**
+with exactly one producer and (still) zero consumers, a pub/sub
+indirection is speculative infrastructure this codebase's own
+discipline argues against — a direct call is simpler, equally testable,
+and trivially upgradable to a real subscriber the day a second consumer
+actually exists (`docs/M4_ARCHITECTURE_PROPOSAL.md` §29).

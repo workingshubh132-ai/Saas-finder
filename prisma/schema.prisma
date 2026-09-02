@@ -154,6 +154,9 @@ model ApprovalRequest {
   createdAt DateTime  @default(now()) @map("created_at")
   expiresAt DateTime? @map("expires_at")
 
+  /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §20.
+  decisionRecords DecisionRecord[]
+
   @@index([status])
   @@index([resourceType, resourceId])
   @@map("approval_requests")
@@ -196,6 +199,8 @@ model Evidence {
 
   opportunityLinks OpportunityEvidence[]
   resolvedGaps     EvidenceGap[]
+  /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §4.
+  claimLinks       ClaimEvidence[]
 
   @@index([collectedByAgentId])
   @@index([sourceType])
@@ -243,6 +248,13 @@ model Opportunity {
   chairmanReviews    ChairmanReview[]
   evidenceGaps       EvidenceGap[]
   researchQueueItems ResearchQueueItem[]
+
+  /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §21.
+  claims             Claim[]
+  ceoRecommendations CeoRecommendation[]
+  investmentMemos    InvestmentMemo[]
+  decisionRecords    DecisionRecord[]
+  decisionCycles     DecisionCycle[]
 
   @@index([status])
   @@index([problemId])
@@ -398,6 +410,8 @@ model Identity {
 
   executionsStarted     AgentExecution[]
   researchCyclesStarted ResearchCycle[]
+  /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §21.
+  decisionCyclesStarted DecisionCycle[]
 
   @@index([agentId])
   @@index([status])
@@ -422,6 +436,12 @@ model AgentExecution {
   /// (docs/M3_ARCHITECTURE_PROPOSAL.md §22).
   researchCycleId String?        @map("research_cycle_id")
   researchCycle   ResearchCycle? @relation(fields: [researchCycleId], references: [id], onDelete: SetNull)
+
+  /// M4 — set when this execution ran as a step inside a bounded
+  /// DecisionCycle (docs/M4_ARCHITECTURE_PROPOSAL.md §21), mirroring
+  /// researchCycleId exactly.
+  decisionCycleId String?        @map("decision_cycle_id")
+  decisionCycle   DecisionCycle? @relation(fields: [decisionCycleId], references: [id], onDelete: SetNull)
 
   status String @default("CREATED")
 
@@ -456,6 +476,7 @@ model AgentExecution {
   @@index([status])
   @@index([agentId])
   @@index([taskId])
+  @@index([decisionCycleId])
   @@map("agent_executions")
 }
 
@@ -506,6 +527,10 @@ model ChairmanReview {
   modelName     String @map("model_name")
 
   createdAt DateTime @default(now()) @map("created_at")
+
+  /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §17, §20.
+  investmentMemos InvestmentMemo[]
+  decisionRecords DecisionRecord[]
 
   @@index([opportunityId])
   @@map("chairman_reviews")
@@ -706,7 +731,16 @@ model EvidenceGap {
   suggestedResearchQuestion String @map("suggested_research_question")
   /// Deterministic ranking input: how much resolving this gap would
   /// matter (weight in the score) x how unresolved it currently is.
+  /// M4 — when claimId is set, computed via the claim-aware Expected
+  /// Information Gain formula instead (domain/claim/eig.ts;
+  /// docs/M4_ARCHITECTURE_PROPOSAL.md §15).
   impactScore               Float  @map("impact_score")
+
+  /// M4 — set when this gap is about a specific Claim rather than a
+  /// bare scoring dimension (docs/M4_ARCHITECTURE_PROPOSAL.md §15).
+  /// Null keeps the original M3 dimension-level gap path unchanged.
+  claimId String? @map("claim_id")
+  claim   Claim?  @relation(fields: [claimId], references: [id], onDelete: SetNull)
 
   resolvedAt           DateTime? @map("resolved_at")
   resolvedByEvidenceId String?   @map("resolved_by_evidence_id")
@@ -718,6 +752,7 @@ model EvidenceGap {
 
   @@index([opportunityId])
   @@index([status])
+  @@index([claimId])
   @@map("evidence_gaps")
 }
 
@@ -781,4 +816,277 @@ model ResearchQueueItem {
   @@index([status])
   @@index([opportunityId])
   @@map("research_queue_items")
+}
+
+// ---------------------------------------------------------------------------
+// M4 — Decision Intelligence Engine
+// (docs/M4_ARCHITECTURE_PROPOSAL.md)
+// ---------------------------------------------------------------------------
+
+/// The falsifiable unit of assertion underneath an Opportunity's
+/// dimension-level scores (docs/M4_ARCHITECTURE_PROPOSAL.md §3) —
+/// exactly twelve claimTypes (domain/claim/claim.types.ts), each
+/// traceable to a field VentureForge already computed.
+model Claim {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  /// One of CLAIM_TYPES.
+  claimType String @map("claim_type")
+  statement String
+
+  /// CRITICAL|HIGH|MEDIUM|LOW — assigned deterministically from claimType.
+  importance String
+
+  /// One of CLAIM_VALIDATION_STATUSES (domain/claim/claim-validation.types.ts).
+  status String @default("UNVERIFIED")
+
+  /// Deterministically recalculated (§11) — never a raw model number.
+  confidence Float @default(0)
+
+  /// Free label naming which real field this claim was extracted from
+  /// (e.g. "PROBLEM.willingnessToPaySignal") — traceability against
+  /// Part 44's "never fabricate" requirement.
+  extractedFrom String? @map("extracted_from")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  claimEvidence     ClaimEvidence[]
+  validationReports ValidationReport[]
+  evidenceGaps      EvidenceGap[]
+
+  @@index([opportunityId])
+  @@index([status])
+  @@map("claims")
+}
+
+/// The Claim<->Evidence relationship (§4) — a genuine relation, not
+/// metadata. Deliberately append-only, not unique on (claimId,
+/// evidenceId): each ValidationReport run creates fresh rows rather
+/// than upserting an earlier classification, so contradicting evidence
+/// already found is never erased by a later, more favorable read (§6).
+model ClaimEvidence {
+  id String @id @default(cuid())
+
+  claimId String @map("claim_id")
+  claim   Claim  @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  evidenceId String   @map("evidence_id")
+  evidence   Evidence @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  /// SUPPORTING|CONTRADICTING|UNKNOWN (domain/claim/claim-evidence.types.ts).
+  relationship String
+  reasoning    String
+
+  validationReportId String?           @map("validation_report_id")
+  validationReport   ValidationReport? @relation(fields: [validationReportId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([claimId])
+  @@index([evidenceId])
+  @@map("claim_evidence")
+}
+
+/// The Evidence Validator's structured, adversarial output for one
+/// Claim (§2, §15) — Zod/domain-validated, never raw model output
+/// trusted directly. Append-only: a re-validation is always a new row.
+model ValidationReport {
+  id String @id @default(cuid())
+
+  claimId String @map("claim_id")
+  claim   Claim  @relation(fields: [claimId], references: [id], onDelete: Restrict)
+
+  /// One of CLAIM_VALIDATION_STATUSES — this run's conclusion.
+  status String
+  /// The Validator's own confidence in ITS assessment — distinct from
+  /// Claim.confidence, the separate deterministic value this report
+  /// feeds into the confidence-recalculation formula (§11).
+  confidence Float
+
+  /// JSON-encoded string[] of Evidence ids.
+  supportingEvidenceIds    String @map("supporting_evidence_ids")
+  contradictingEvidenceIds String @map("contradicting_evidence_ids")
+
+  /// JSON-encoded IndependenceAssessment ({level, reasoning}).
+  independenceAssessment String @map("independence_assessment")
+  /// JSON-encoded EvidenceQualityAssessment (all 7 factors + aggregate) — never collapsed to one number (§8).
+  qualityAssessment String @map("quality_assessment")
+
+  reasoning String
+  /// JSON-encoded string[] — what evidence is still missing.
+  missingEvidence String @map("missing_evidence")
+  /// The single next research question this report recommends — feeds EIG/evidence-gap (§15).
+  recommendedResearch String @map("recommended_research")
+
+  modelProvider String @map("model_provider")
+  modelName     String @map("model_name")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  claimEvidence ClaimEvidence[]
+
+  @@index([claimId])
+  @@map("validation_reports")
+}
+
+/// The CEO's structured, historized recommendation for one Opportunity
+/// (§12) — append-only, mirroring ChairmanReview/OpportunityScoreRecord
+/// exactly (§27). Every recommendation cites specific claim/report ids
+/// — never "KILL - score 42" with no reasoning.
+model CeoRecommendation {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  decisionCycleId String?        @map("decision_cycle_id")
+  decisionCycle   DecisionCycle? @relation(fields: [decisionCycleId], references: [id], onDelete: SetNull)
+
+  /// One of CEO_DECISION_ACTIONS (domain/decision/decision-action.types.ts) — exactly six, no more.
+  action    String
+  reasoning String
+
+  /// JSON-encoded string[].
+  citedClaimIds            String @map("cited_claim_ids")
+  citedValidationReportIds String @map("cited_validation_report_ids")
+
+  confidence    Float
+  priorityScore Float @map("priority_score")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  investmentMemos InvestmentMemo[]
+  decisionRecords DecisionRecord[]
+
+  @@index([opportunityId])
+  @@map("ceo_recommendations")
+}
+
+/// The Human Owner's actual final artifact (§17) — compiled
+/// deterministically from already-persisted data, zero new model
+/// calls. Append-only: a re-run after new evidence is a new row, never
+/// an edit, so it stays clear which memo a given human decision was
+/// actually made against (§27).
+model InvestmentMemo {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  ceoRecommendationId String            @map("ceo_recommendation_id")
+  ceoRecommendation   CeoRecommendation @relation(fields: [ceoRecommendationId], references: [id], onDelete: Restrict)
+
+  chairmanReviewId String         @map("chairman_review_id")
+  chairmanReview   ChairmanReview @relation(fields: [chairmanReviewId], references: [id], onDelete: Restrict)
+
+  /// JSON-encoded full structured memo body (every brief-named section).
+  content String
+
+  /// MANDATORY, own column (never buried in content JSON): the
+  /// Chairman's own top-ranked objection — never generic.
+  strongestArgumentAgainst String @map("strongest_argument_against")
+  /// MANDATORY, own column: the CEO's own evidence-grounded reasoning.
+  investmentThesis String @map("investment_thesis")
+
+  recommendation String
+  confidence     Float
+  keyReason      String @map("key_reason")
+  biggestRisk    String @map("biggest_risk")
+  nextAction     String @map("next_action")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  decisionRecords DecisionRecord[]
+
+  @@index([opportunityId])
+  @@map("investment_memos")
+}
+
+/// The final, immutable snapshot of one human decision (§20, §27) —
+/// fires OPPORTUNITY_DECISION_RECORDED. Denormalizes rejected/accepted
+/// claim ids directly (not just reachable via joins) so future
+/// calibration queries (Part 39) don't need to join through three
+/// tables.
+model DecisionRecord {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  approvalRequestId String          @map("approval_request_id")
+  approvalRequest   ApprovalRequest @relation(fields: [approvalRequestId], references: [id], onDelete: Restrict)
+
+  investmentMemoId String?         @map("investment_memo_id")
+  investmentMemo   InvestmentMemo? @relation(fields: [investmentMemoId], references: [id], onDelete: SetNull)
+
+  ceoRecommendationId String?            @map("ceo_recommendation_id")
+  ceoRecommendation   CeoRecommendation? @relation(fields: [ceoRecommendationId], references: [id], onDelete: SetNull)
+
+  chairmanReviewId String?         @map("chairman_review_id")
+  chairmanReview   ChairmanReview? @relation(fields: [chairmanReviewId], references: [id], onDelete: SetNull)
+
+  /// Mirrors ApprovalRequest.status at decision time (APPROVED/REJECTED/DEFERRED).
+  humanDecision String  @map("human_decision")
+  humanReason   String? @map("human_reason")
+
+  opportunityScoreAtDecision Float? @map("opportunity_score_at_decision")
+  confidenceAtDecision       Float? @map("confidence_at_decision")
+  killRiskAtDecision         Float? @map("kill_risk_at_decision")
+
+  /// JSON-encoded string[] — structured feedback for future calibration (Part 38/39), never auto-retraining.
+  rejectedClaimIds     String @map("rejected_claim_ids")
+  acceptedClaimIds     String @map("accepted_claim_ids")
+  missingEvidenceNoted String @map("missing_evidence_noted")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([opportunityId])
+  @@map("decision_records")
+}
+
+/// The CEO-pipeline sibling of ResearchCycle (§16, §21, §25) —
+/// entry-pointed on an existing opportunityId rather than a cold-start
+/// objective. Same bounded/budgeted/audited shape, sharing the
+/// identical status lifecycle (domain/shared/cycle-lifecycle.ts).
+model DecisionCycle {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  status String @default("SCHEDULED")
+
+  startedByIdentityId String   @map("started_by_identity_id")
+  startedByIdentity   Identity @relation(fields: [startedByIdentityId], references: [id], onDelete: Restrict)
+
+  maxClaims            Int @map("max_claims")
+  maxValidatorSearches Int @map("max_validator_searches")
+  maxModelCalls        Int @map("max_model_calls")
+  maxResearchTasks     Int @map("max_research_tasks")
+  maxCeoPlanningSteps  Int @map("max_ceo_planning_steps")
+  maxDurationMs        Int @map("max_duration_ms")
+
+  claimsValidated      Int @default(0) @map("claims_validated")
+  validatorSearchCount Int @default(0) @map("validator_search_count")
+  modelCallCount       Int @default(0) @map("model_call_count")
+  researchTasksCreated Int @default(0) @map("research_tasks_created")
+  ceoPlanningSteps     Int @default(0) @map("ceo_planning_steps")
+
+  /// Set when status = STOPPED: which budget was exhausted (§25).
+  stoppedReason String? @map("stopped_reason")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+
+  ceoRecommendations CeoRecommendation[]
+  executions         AgentExecution[]
+
+  @@index([status])
+  @@index([opportunityId])
+  @@map("decision_cycles")
 }

@@ -30,7 +30,11 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
-function specificityScore(content: string): number {
+/** Exported for reuse as the specificity factor in M4's evidence-quality
+ *  assessment (domain/claim/evidence-quality.ts; docs/M4_ARCHITECTURE_PROPOSAL.md
+ *  §8) — the same cheap, defensible content-length proxy, not a second
+ *  implementation of the same idea. */
+export function specificityScore(content: string): number {
   return clamp01(content.trim().length / SPECIFICITY_LENGTH_CAP);
 }
 

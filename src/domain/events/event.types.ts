@@ -20,12 +20,25 @@ export const DOMAIN_EVENT_TYPES = [
   "COMPETITOR_ANALYSIS_COMPLETED",
   "RESEARCH_CYCLE_STARTED",
   "RESEARCH_CYCLE_COMPLETED",
-  /** Fired by the opportunity-feedback event-bus subscriber, not by
-   *  approvalService itself, so a future learning process reads one
+  /** Reserved in M3, first actually fired in M4 — by
+   *  `decisionRecordService.applyHumanDecision` directly (a single
+   *  call site, not a registered event-bus subscriber; see
+   *  docs/M4_ARCHITECTURE_PROPOSAL.md §20, §29 for why the pub/sub
+   *  indirection the M3 doc comment originally envisioned was judged
+   *  unnecessary), so a future learning process reads one
    *  self-contained snapshot (decision + score + confidence + kill
-   *  risk + Chairman decision) instead of joining four tables
-   *  (M3 brief Part 32/33; docs/M3_ARCHITECTURE_PROPOSAL.md §16). */
+   *  risk + Chairman decision + CEO action + accepted/rejected claims)
+   *  instead of joining four tables (M3 brief Part 32/33; M4 brief
+   *  Part 38; docs/M4_ARCHITECTURE_PROPOSAL.md §27). */
   "OPPORTUNITY_DECISION_RECORDED",
+  // M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §27.
+  "CLAIM_EXTRACTED",
+  "CLAIM_VALIDATED",
+  "CEO_RECOMMENDATION_ISSUED",
+  "INVESTMENT_MEMO_CREATED",
+  "OPPORTUNITY_KILLED",
+  "DECISION_CYCLE_STARTED",
+  "DECISION_CYCLE_COMPLETED",
 ] as const;
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
 

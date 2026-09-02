@@ -172,9 +172,12 @@ export const opportunityAnalystService = {
 /**
  * Idempotent (§8): a signal already promoted to Evidence is reused via
  * OpportunityEvidence rather than duplicated — the same signal can
- * legitimately back more than one Opportunity over time.
+ * legitimately back more than one Opportunity over time. Exported for
+ * reuse by evidence-validator.service.ts (docs/M4_ARCHITECTURE_PROPOSAL.md
+ * §2) — the same idempotent promotion applies to counter-evidence a
+ * validation search turns up, not just first-pass discovery.
  */
-async function promoteSignalsToEvidence(signals: Signal[], agentId: string) {
+export async function promoteSignalsToEvidence(signals: Signal[], agentId: string) {
   const evidence = [];
   for (const signal of signals) {
     const existing = await evidenceRepository.findBySignalId(signal.id);
