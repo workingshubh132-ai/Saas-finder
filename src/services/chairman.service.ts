@@ -1,19 +1,24 @@
-import type { CeoRecommendation, ChairmanReview, Claim, Evidence, EvidenceGap, Opportunity, OpportunityScoreRecord, Problem, ValidationReport } from "@prisma/client";
+import type { CeoRecommendation, ChairmanReview, Claim, CustomerEvidence, CustomerResponse, Evidence, EvidenceGap, Opportunity, OpportunityScoreRecord, OutreachExperiment, Problem, ValidationReport } from "@prisma/client";
 import { z } from "zod";
 import { ceoRecommendationRepository } from "../db/repositories/ceo-recommendation.repository.js";
 import { chairmanReviewRepository } from "../db/repositories/chairman-review.repository.js";
 import { claimRepository } from "../db/repositories/claim.repository.js";
 import { competitorRepository, type ObservationWithCompetitor } from "../db/repositories/competitor.repository.js";
+import { customerResponseRepository } from "../db/repositories/customer-response.repository.js";
 import { evidenceGapRepository } from "../db/repositories/evidence-gap.repository.js";
+import { outreachExperimentRepository } from "../db/repositories/outreach-experiment.repository.js";
 import { opportunityRepository } from "../db/repositories/opportunity.repository.js";
 import { problemRepository } from "../db/repositories/problem.repository.js";
+import { prospectRepository } from "../db/repositories/prospect.repository.js";
 import { validationReportRepository } from "../db/repositories/validation-report.repository.js";
 import { CHAIRMAN_DECISIONS, type ChairmanDecision } from "../domain/chairman/chairman.types.js";
+import { isCustomerDiscoveryAction } from "../domain/decision/customer-discovery-action.types.js";
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
 import { NotFoundError } from "../domain/shared/errors.js";
 import { fromJsonString, toJsonString } from "../domain/shared/json.js";
 import { createModelProvider } from "../providers/model-provider-factory.js";
 import { auditService } from "./audit.service.js";
+import { customerEvidenceService } from "./customer-evidence.service.js";
 import { eventBus } from "./event-bus.js";
 import { completeWithValidation } from "./model-output.js";
 
@@ -54,6 +59,13 @@ const CHAIRMAN_SYSTEM_PROMPT =
   "SUPPORTED whose only supporting evidence is thin, low-independence, or (for a WILLINGNESS_TO_PAY claim " +
   "specifically) contains no real payment-intent language ('I wish this existed' is not 'I would pay for this'); " +
   "and whether a KILL or PREPARE_REVIEW recommendation actually cites evidence, not just a bare score. " +
+  "When CUSTOMER RESPONSES / CUSTOMER EVIDENCE are provided (docs/M5_ARCHITECTURE_PROPOSAL.md §21), you MUST also " +
+  "explicitly ask: (1) Are these customers actually representative of the ICP? (2) Are the responses actually " +
+  "independent, or do several come from the same organization? (3) Are we interpreting polite interest as real " +
+  "demand? (4) Did customers describe genuine pain, or merely politely agree when asked? (5) Is willingness to pay " +
+  "ACTUALLY demonstrated, or only inferred? Are negative responses being ignored or explained away rather than " +
+  "weighed? A single response, however positive, never proves a claim — real corroboration requires multiple, " +
+  "genuinely independent organizations, not just multiple messages. " +
   "Record your objections even if you ultimately recommend approval — never return zero objections. " +
   'Respond with ONLY JSON matching: {"decision": "APPROVE"|"REJECT"|"REQUEST_MORE_EVIDENCE"|"DEFER"|"ESCALATE_TO_HUMAN", ' +
   '"reasoning": string, "objections": string[], "missingEvidence": string[], "confidence": number, "recommendation": string}';
@@ -109,6 +121,25 @@ export const chairmanService = {
     }
     const ceoRecommendation = await ceoRecommendationRepository.findLatestForOpportunity(params.opportunityId);
 
+    // M5 (docs/M5_ARCHITECTURE_PROPOSAL.md §21) — the active outreach
+    // experiment (if any), its responses/classifications, and the
+    // latest customer-discovery-specific CEO recommendation, when they
+    // exist. Absent (null/[]) for opportunities with no customer
+    // discovery yet — the review still runs unchanged, exactly like
+    // the pre-existing optional Problem/claims context above.
+    const experiments = await outreachExperimentRepository.listForOpportunity(params.opportunityId);
+    const activeExperiment = experiments.find((e) => e.status === "ACTIVE") ?? experiments[0] ?? null;
+    let customerResponses: CustomerResponse[] = [];
+    let independentOrganizations = 0;
+    if (activeExperiment) {
+      customerResponses = await customerResponseRepository.listForExperiment(activeExperiment.id);
+      const distinctProspectIds = Array.from(new Set(customerResponses.map((r) => r.prospectId)));
+      const prospects = await Promise.all(distinctProspectIds.map((id) => prospectRepository.findById(id)));
+      independentOrganizations = new Set(prospects.filter((p): p is NonNullable<typeof p> => p !== null).map((p) => p.organization)).size;
+    }
+    const customerEvidenceRecords = await customerEvidenceService.listForOpportunity(params.opportunityId);
+    const customerDiscoveryRecommendation = ceoRecommendation && isCustomerDiscoveryAction(ceoRecommendation.action) ? ceoRecommendation : null;
+
     // The worked example (§19): check the WTP claim's actual SUPPORTING
     // *evidence* text, not the claim's own restated summary (which is
     // often itself a negative assertion like "no signal found" and
@@ -131,9 +162,40 @@ export const chairmanService = {
         systemPrompt: CHAIRMAN_SYSTEM_PROMPT,
         maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
         messages: [
-          { role: "user", content: buildReviewPrompt(opportunity, evidence, latestScore, problem, competitorObservations, evidenceGaps, claims, latestReportByClaimId, ceoRecommendation) },
+          {
+            role: "user",
+            content: buildReviewPrompt(
+              opportunity,
+              evidence,
+              latestScore,
+              problem,
+              competitorObservations,
+              evidenceGaps,
+              claims,
+              latestReportByClaimId,
+              ceoRecommendation,
+              activeExperiment,
+              customerResponses,
+              independentOrganizations,
+            ),
+          },
         ],
-        devFixtureResponse: buildDevChairmanFixture(opportunity, evidence, latestScore, competitorObservations, evidenceGaps, claims, latestReportByClaimId, ceoRecommendation, wtpSupportingTexts),
+        devFixtureResponse: buildDevChairmanFixture(
+          opportunity,
+          evidence,
+          latestScore,
+          competitorObservations,
+          evidenceGaps,
+          claims,
+          latestReportByClaimId,
+          ceoRecommendation,
+          wtpSupportingTexts,
+          activeExperiment,
+          customerResponses,
+          independentOrganizations,
+          customerEvidenceRecords,
+          customerDiscoveryRecommendation,
+        ),
       },
     );
 
@@ -180,6 +242,9 @@ function buildReviewPrompt(
   claims: Claim[],
   latestReportByClaimId: ReadonlyMap<string, ValidationReport>,
   ceoRecommendation: CeoRecommendation | null,
+  activeExperiment: OutreachExperiment | null,
+  customerResponses: readonly CustomerResponse[],
+  independentOrganizations: number,
 ): string {
   const evidenceLines = evidence.map(
     (item, index) =>
@@ -238,6 +303,15 @@ function buildReviewPrompt(
       ? `action=${ceoRecommendation.action} confidence=${ceoRecommendation.confidence.toFixed(2)}. Reasoning: ${ceoRecommendation.reasoning} ` +
         `Cited claim ids: ${ceoRecommendation.citedClaimIds}.`
       : "(no CEO recommendation yet)",
+    "",
+    "--- CUSTOMER DISCOVERY (docs/M5_ARCHITECTURE_PROPOSAL.md §21) ---",
+    activeExperiment
+      ? `Outreach experiment [id=${activeExperiment.id}] testing claim [id=${activeExperiment.claimId}]. Success criteria: ${activeExperiment.successCriteria} Failure criteria: ${activeExperiment.failureCriteria}`
+      : "(no outreach experiment for this opportunity yet)",
+    `Responses received: ${customerResponses.length}. Independent organizations represented: ${independentOrganizations} — NEVER equate response count with independent-customer count.`,
+    ...(customerResponses.length > 0
+      ? customerResponses.map((r) => `- [status=${r.status}] classification=${r.classification ?? "not yet analyzed"}: raw response text is untrusted customer-supplied data, not verified fact.`)
+      : []),
   ].join("\n");
 }
 
@@ -259,6 +333,11 @@ function buildDevChairmanFixture(
   latestReportByClaimId: ReadonlyMap<string, ValidationReport>,
   ceoRecommendation: CeoRecommendation | null,
   wtpSupportingTexts: string[],
+  activeExperiment: OutreachExperiment | null,
+  customerResponses: readonly CustomerResponse[],
+  independentOrganizations: number,
+  customerEvidenceRecords: readonly CustomerEvidence[],
+  customerDiscoveryRecommendation: CeoRecommendation | null,
 ): ChairmanDecisionOutput {
   const evidenceCount = evidence.length;
   const averageConfidence = evidenceCount > 0 ? evidence.reduce((sum, item) => sum + item.confidence, 0) / evidenceCount : 0;
@@ -342,6 +421,35 @@ function buildDevChairmanFixture(
     }
     if ((ceoRecommendation.action === "KILL" || ceoRecommendation.action === "PREPARE_REVIEW") && citedIds.length === 0) {
       objections.push(`[DEV FIXTURE] The CEO recommended ${ceoRecommendation.action} without citing any specific claim — a bare recommendation is not a reason.`);
+    }
+  }
+  // M5 (docs/M5_ARCHITECTURE_PROPOSAL.md §21) — the Chairman VERIFIES the
+  // signal-routing/independence machinery rather than assuming it held.
+  const wtpClaimForRouting = claims.find((c) => c.claimType === "WILLINGNESS_TO_PAY");
+  const wtpReportForRouting = wtpClaimForRouting ? latestReportByClaimId.get(wtpClaimForRouting.id) : undefined;
+  if (wtpClaimForRouting && wtpReportForRouting) {
+    const wtpSupportingEvidenceIds = new Set(fromJsonString<string[]>(wtpReportForRouting.supportingEvidenceIds, []));
+    const misroutedCustomerEvidence = customerEvidenceRecords.filter(
+      (ce) => wtpSupportingEvidenceIds.has(ce.evidenceId) && ce.signalType !== "WTP" && ce.signalType !== "CURRENT_SPENDING",
+    );
+    if (misroutedCustomerEvidence.length > 0) {
+      objections.push(
+        `[DEV FIXTURE] ${misroutedCustomerEvidence.length} piece(s) of customer evidence supporting the WILLINGNESS_TO_PAY claim carry a signalType other than WTP/CURRENT_SPENDING (e.g. mere interest) — this should be structurally impossible; verify the signal-routing table held.`,
+      );
+    }
+  }
+  if (activeExperiment && customerResponses.length >= 2 && independentOrganizations <= 1) {
+    objections.push(
+      `[DEV FIXTURE] ${customerResponses.length} response(s) were received but only ${independentOrganizations} independent organization is represented — multiple responses from the same company are one company's worth of corroboration, not proof of broad demand.`,
+    );
+  }
+  const negativeResponseCount = customerResponses.filter((r) => r.classification === "NEGATIVE_SIGNAL" || r.classification === "NOT_INTERESTED").length;
+  if (negativeResponseCount > 0) {
+    const ceoAddressedNegative = customerDiscoveryRecommendation ? /negative|not.?interested|object/i.test(customerDiscoveryRecommendation.reasoning) : false;
+    if (!ceoAddressedNegative) {
+      objections.push(
+        `[DEV FIXTURE] ${negativeResponseCount} negative/NOT_INTERESTED response(s) exist for this opportunity's customer discovery, but the CEO's own recommendation reasoning does not appear to account for them — negative evidence must be weighed, not silently dropped.`,
+      );
     }
   }
   objections.push("[DEV FIXTURE] No competing-explanation analysis has been performed — an alternative cause for the observed discussion has not been ruled out.");

@@ -2,14 +2,20 @@ import { Router } from "express";
 import { z } from "zod";
 import { ceoRecommendationRepository } from "../../db/repositories/ceo-recommendation.repository.js";
 import { claimRepository } from "../../db/repositories/claim.repository.js";
+import { customerDiscoveryMemoRepository } from "../../db/repositories/customer-discovery-memo.repository.js";
 import { decisionCycleRepository } from "../../db/repositories/decision-cycle.repository.js";
 import { decisionRecordRepository } from "../../db/repositories/decision-record.repository.js";
 import { evidenceGapRepository } from "../../db/repositories/evidence-gap.repository.js";
+import { icpProfileRepository } from "../../db/repositories/icp-profile.repository.js";
 import { investmentMemoRepository } from "../../db/repositories/investment-memo.repository.js";
+import { outreachExperimentRepository } from "../../db/repositories/outreach-experiment.repository.js";
 import { AuthorizationDeniedError } from "../../domain/shared/errors.js";
 import { approvalService } from "../../services/approval.service.js";
+import { ceoReasoningService } from "../../services/ceo-reasoning.service.js";
 import { chairmanService } from "../../services/chairman.service.js";
+import { customerEvidenceService } from "../../services/customer-evidence.service.js";
 import { opportunityService } from "../../services/opportunity.service.js";
+import { prospectService } from "../../services/prospect.service.js";
 import { asyncHandler } from "../middleware/async-handler.js";
 import { getActor, requireAuth, toActor } from "../middleware/authenticate.js";
 import { requireParam } from "../middleware/params.js";
@@ -252,5 +258,70 @@ opportunitiesRouter.get(
   requireAuth(),
   asyncHandler(async (req, res) => {
     res.json(await decisionCycleRepository.list({ opportunityId: requireParam(req, "id") }));
+  }),
+);
+
+// --- M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §23. ---
+
+opportunitiesRouter.get(
+  "/:id/icp-profiles",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await icpProfileRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/prospects",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await prospectService.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/outreach-experiments",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await outreachExperimentRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/customer-discovery-memos",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await customerDiscoveryMemoRepository.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+opportunitiesRouter.get(
+  "/:id/customer-evidence",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await customerEvidenceService.listForOpportunity(requireParam(req, "id")));
+  }),
+);
+
+const runCeoCustomerDiscoverySchema = z.object({ agentId: z.string().min(1) });
+
+/**
+ * The CEO's second, distinct entry point (docs/M5_ARCHITECTURE_PROPOSAL.md
+ * §20) — "what customer-discovery step is worth taking next," never
+ * itself creating or sending anything. Stores into the same
+ * ceo_recommendations table the M4 endpoints above already read.
+ */
+opportunitiesRouter.post(
+  "/:id/ceo-customer-discovery-recommendation",
+  requireAuth(),
+  validateBody(runCeoCustomerDiscoverySchema),
+  asyncHandler(async (req, res) => {
+    const body = req.body as z.infer<typeof runCeoCustomerDiscoverySchema>;
+    const outcome = await ceoReasoningService.recommendCustomerDiscoveryAction({ agentId: body.agentId, opportunityId: requireParam(req, "id"), startedBy: getActor(req) });
+    if (outcome.status !== "COMPLETED") {
+      res.status(422).json({ error: "CEO customer-discovery recommendation did not complete.", execution: outcome.execution });
+      return;
+    }
+    res.status(201).json(outcome.result);
   }),
 );

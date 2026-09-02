@@ -59,6 +59,12 @@ model Agent {
   identities        Identity[]
   executions        AgentExecution[]
 
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §22.
+  icpProfilesGenerated      IcpProfile[]
+  prospectsDiscovered       Prospect[]
+  outreachMessagesDrafted   OutreachMessage[]
+  customerEvidenceExtracted CustomerEvidence[]
+
   @@index([status])
   @@index([department])
   @@map("agents")
@@ -157,6 +163,9 @@ model ApprovalRequest {
   /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §20.
   decisionRecords DecisionRecord[]
 
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §13. One ApprovalRequest ever binds to one OutreachMessage (resourceType="OUTREACH_MESSAGE").
+  outreachMessages OutreachMessage[]
+
   @@index([status])
   @@index([resourceType, resourceId])
   @@map("approval_requests")
@@ -197,10 +206,12 @@ model Evidence {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  opportunityLinks OpportunityEvidence[]
-  resolvedGaps     EvidenceGap[]
+  opportunityLinks        OpportunityEvidence[]
+  resolvedGaps            EvidenceGap[]
   /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §4.
-  claimLinks       ClaimEvidence[]
+  claimLinks              ClaimEvidence[]
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §16. Set when sourceType="CUSTOMER" and this row was produced by the Response Analyst.
+  customerEvidenceWrapper CustomerEvidence[]
 
   @@index([collectedByAgentId])
   @@index([sourceType])
@@ -255,6 +266,12 @@ model Opportunity {
   investmentMemos    InvestmentMemo[]
   decisionRecords    DecisionRecord[]
   decisionCycles     DecisionCycle[]
+
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §22.
+  icpProfiles            IcpProfile[]
+  prospects              Prospect[]
+  outreachExperiments    OutreachExperiment[]
+  customerDiscoveryMemos CustomerDiscoveryMemo[]
 
   @@index([status])
   @@index([problemId])
@@ -408,10 +425,13 @@ model Identity {
   expiresAt           DateTime? @map("expires_at")
   lastUsedAt          DateTime? @map("last_used_at")
 
-  executionsStarted     AgentExecution[]
-  researchCyclesStarted ResearchCycle[]
+  executionsStarted          AgentExecution[]
+  researchCyclesStarted      ResearchCycle[]
   /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §21.
-  decisionCyclesStarted DecisionCycle[]
+  decisionCyclesStarted      DecisionCycle[]
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §22.
+  outreachExperimentsCreated OutreachExperiment[]
+  customerResponsesEntered   CustomerResponse[]
 
   @@index([agentId])
   @@index([status])
@@ -529,8 +549,10 @@ model ChairmanReview {
   createdAt DateTime @default(now()) @map("created_at")
 
   /// M4 — docs/M4_ARCHITECTURE_PROPOSAL.md §17, §20.
-  investmentMemos InvestmentMemo[]
-  decisionRecords DecisionRecord[]
+  investmentMemos        InvestmentMemo[]
+  decisionRecords        DecisionRecord[]
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §21-22.
+  customerDiscoveryMemos CustomerDiscoveryMemo[]
 
   @@index([opportunityId])
   @@map("chairman_reviews")
@@ -858,6 +880,10 @@ model Claim {
   validationReports ValidationReport[]
   evidenceGaps      EvidenceGap[]
 
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §11-12. Which claim an experiment/message is actually testing.
+  outreachExperiments OutreachExperiment[]
+  outreachMessages    OutreachMessage[]
+
   @@index([opportunityId])
   @@index([status])
   @@map("claims")
@@ -901,7 +927,7 @@ model ValidationReport {
   claim   Claim  @relation(fields: [claimId], references: [id], onDelete: Restrict)
 
   /// One of CLAIM_VALIDATION_STATUSES — this run's conclusion.
-  status String
+  status     String
   /// The Validator's own confidence in ITS assessment — distinct from
   /// Claim.confidence, the separate deterministic value this report
   /// feeds into the confidence-recalculation formula (§11).
@@ -914,11 +940,11 @@ model ValidationReport {
   /// JSON-encoded IndependenceAssessment ({level, reasoning}).
   independenceAssessment String @map("independence_assessment")
   /// JSON-encoded EvidenceQualityAssessment (all 7 factors + aggregate) — never collapsed to one number (§8).
-  qualityAssessment String @map("quality_assessment")
+  qualityAssessment      String @map("quality_assessment")
 
-  reasoning String
+  reasoning           String
   /// JSON-encoded string[] — what evidence is still missing.
-  missingEvidence String @map("missing_evidence")
+  missingEvidence     String @map("missing_evidence")
   /// The single next research question this report recommends — feeds EIG/evidence-gap (§15).
   recommendedResearch String @map("recommended_research")
 
@@ -959,8 +985,10 @@ model CeoRecommendation {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  investmentMemos InvestmentMemo[]
-  decisionRecords DecisionRecord[]
+  investmentMemos        InvestmentMemo[]
+  decisionRecords        DecisionRecord[]
+  /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §20, §22.
+  customerDiscoveryMemos CustomerDiscoveryMemo[]
 
   @@index([opportunityId])
   @@map("ceo_recommendations")
@@ -990,7 +1018,7 @@ model InvestmentMemo {
   /// Chairman's own top-ranked objection — never generic.
   strongestArgumentAgainst String @map("strongest_argument_against")
   /// MANDATORY, own column: the CEO's own evidence-grounded reasoning.
-  investmentThesis String @map("investment_thesis")
+  investmentThesis         String @map("investment_thesis")
 
   recommendation String
   confidence     Float
@@ -1089,4 +1117,326 @@ model DecisionCycle {
   @@index([status])
   @@index([opportunityId])
   @@map("decision_cycles")
+}
+
+// ---------------------------------------------------------------------------
+// M5 — Customer Discovery Intelligence
+// (docs/M5_ARCHITECTURE_PROPOSAL.md)
+// ---------------------------------------------------------------------------
+
+/// Who VentureForge believes should be talked to, derived from an
+/// opportunity's own Claims/Evidence (§3) — historized like
+/// OpportunityScoreRecord, never overwritten: a refined ICP is a new
+/// row, so which targeting decision a given batch of Prospects was
+/// discovered under always stays a real, queryable fact.
+model IcpProfile {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  industry        String
+  companySizeMin  Int?   @map("company_size_min")
+  companySizeMax  Int?   @map("company_size_max")
+  role            String
+  problemExposure String @map("problem_exposure")
+  likelyFrequency String @map("likely_frequency")
+  geography       String
+  technology      String
+  /// JSON-encoded string[] — who this ICP explicitly does NOT target.
+  exclusions      String
+
+  /// JSON-encoded array of {field, groundedInClaimIds: string[],
+  /// status: EVIDENCED|ASSUMED, reasoning} — one entry per ICP field
+  /// above (§3), mirroring dimensionGrounding's own shape (M3). A
+  /// field with no real grounding is marked ASSUMED with an empty
+  /// groundedInClaimIds array, never invented specificity.
+  fieldGrounding String @map("field_grounding")
+
+  generatedByAgentId String @map("generated_by_agent_id")
+  generatedByAgent   Agent  @relation(fields: [generatedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  prospects           Prospect[]
+  outreachExperiments OutreachExperiment[]
+
+  @@index([opportunityId])
+  @@map("icp_profiles")
+}
+
+/// A candidate person/organization matching an approved ICP (§4, §7-8)
+/// — deliberately minimal fields, only what the brief calls "the
+/// minimum information necessary." `publicContactChannel` is a public
+/// business contact point only (a contact-form URL, a listed business
+/// email, a public business-directory profile) — never a personal
+/// email/phone or anything inferred rather than observed (§10).
+model Prospect {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  /// Nullable only for the SetNull-on-superseded-ICP case (§22) — every
+  /// prospect is discovered against a real, approved ICP in practice.
+  icpProfileId String?     @map("icp_profile_id")
+  icpProfile   IcpProfile? @relation(fields: [icpProfileId], references: [id], onDelete: SetNull)
+
+  organization         String
+  role                 String
+  publicContactChannel String @map("public_contact_channel")
+
+  /// ResearchSource id — never caller-suppliable (§7, mirrors Signal.source).
+  source       String
+  sourceUrl    String   @map("source_url")
+  discoveredAt DateTime @default(now()) @map("discovered_at")
+
+  /// Set once prospectQualificationService runs; null beforehand — never a fabricated default (§5).
+  qualificationStatus String? @map("qualification_status")
+  icpFit              String? @map("icp_fit")
+  reasonForMatch      String? @map("reason_for_match")
+  /// JSON-encoded string[] — an honest list of what remains unknown (§5's own literal example: "actual pain level").
+  unknowns            String  @default("[]")
+
+  /// One of PROSPECT_STATUSES (prospect.types.ts) — pipeline position, distinct from qualificationStatus's assessment outcome.
+  status String @default("DISCOVERED")
+
+  discoveredByAgentId String @map("discovered_by_agent_id")
+  discoveredByAgent   Agent  @relation(fields: [discoveredByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  outreachMessages  OutreachMessage[]
+  customerResponses CustomerResponse[]
+  customerEvidence  CustomerEvidence[]
+
+  @@index([opportunityId])
+  @@index([icpProfileId])
+  @@index([status])
+  @@map("prospects")
+}
+
+/// A bounded, budgeted attempt to learn something specific from real
+/// prospects (§11) — the first hard human gate in the M5 core loop.
+/// Created PENDING_APPROVAL; only an explicit Human Owner action moves
+/// it to ACTIVE. No Prospect may enter APPROVED_FOR_DRAFT under an
+/// experiment that isn't ACTIVE.
+model OutreachExperiment {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  objective String
+
+  /// The Claim this experiment is testing — Restrict: an experiment must always be able to say which claim it tested.
+  claimId String @map("claim_id")
+  claim   Claim  @relation(fields: [claimId], references: [id], onDelete: Restrict)
+
+  targetIcpProfileId String     @map("target_icp_profile_id")
+  targetIcpProfile   IcpProfile @relation(fields: [targetIcpProfileId], references: [id], onDelete: Restrict)
+
+  researchQuestion String @map("research_question")
+  messageStrategy  String @map("message_strategy")
+
+  prospectLimit   Int       @map("prospect_limit")
+  timeWindowStart DateTime? @map("time_window_start")
+  timeWindowEnd   DateTime? @map("time_window_end")
+
+  /// Free text, founder-configurable — no fabricated statistical significance calculator (§11).
+  successCriteria String @map("success_criteria")
+  failureCriteria String @map("failure_criteria")
+
+  /// The ceiling every Prospect discovered under this experiment inherits (§9). Never APPROVED by default.
+  contactPolicy String @default("HUMAN_APPROVAL_REQUIRED") @map("contact_policy")
+
+  status String @default("PENDING_APPROVAL")
+
+  createdByIdentityId String   @map("created_by_identity_id")
+  createdByIdentity   Identity @relation(fields: [createdByIdentityId], references: [id], onDelete: Restrict)
+
+  /// Secondary actor annotation, plain string — mirrors ApprovalRequest.reviewedBy's own precedent (no FK relation).
+  approvedByIdentityId String?   @map("approved_by_identity_id")
+  approvedAt           DateTime? @map("approved_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  outreachMessages       OutreachMessage[]
+  customerDiscoveryMemos CustomerDiscoveryMemo[]
+
+  @@index([opportunityId])
+  @@index([status])
+  @@map("outreach_experiments")
+}
+
+/// A single drafted message to a single, already-bound prospect (§12).
+/// Immutable once created — no update method exists in
+/// outreach-message.repository.ts beyond a status transition, the
+/// structural enforcement of "approved message A cannot become
+/// modified message B" (§13, §25.13). A revised draft is a new row
+/// with a fresh id, requiring its own fresh approval.
+model OutreachMessage {
+  id String @id @default(cuid())
+
+  experimentId String             @map("experiment_id")
+  experiment   OutreachExperiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+
+  prospectId String   @map("prospect_id")
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict)
+
+  /// Immutable — set once at draft time, never updated (§12).
+  content   String
+  reasoning String
+
+  claimBeingTestedId      String @map("claim_being_tested_id")
+  claimBeingTested        Claim  @relation(fields: [claimBeingTestedId], references: [id], onDelete: Restrict)
+  expectedInformationGain Float  @map("expected_information_gain")
+
+  status String @default("DRAFT")
+
+  /// Set once approval is requested (§13); the exact ApprovalRequest a human decision binds to.
+  approvalRequestId String?          @map("approval_request_id")
+  approvalRequest   ApprovalRequest? @relation(fields: [approvalRequestId], references: [id], onDelete: SetNull)
+
+  /// Record-keeping only — no code path in this system ever sends anything externally (§13).
+  contactedAt           DateTime? @map("contacted_at")
+  contactedByIdentityId String?   @map("contacted_by_identity_id")
+
+  draftedByAgentId String @map("drafted_by_agent_id")
+  draftedByAgent   Agent  @relation(fields: [draftedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  customerResponses CustomerResponse[]
+
+  @@index([experimentId])
+  @@index([prospectId])
+  @@index([status])
+  @@map("outreach_messages")
+}
+
+/// A human-pasted record of what a prospect actually said (§14) — no
+/// connector abstraction built for a single implementer. Immutable
+/// rawContent, same provenance discipline as OutreachMessage.content.
+model CustomerResponse {
+  id String @id @default(cuid())
+
+  outreachMessageId String          @map("outreach_message_id")
+  outreachMessage   OutreachMessage @relation(fields: [outreachMessageId], references: [id], onDelete: Restrict)
+
+  /// Denormalized from outreachMessage.prospectId — direct "all responses from this prospect" queries without a join (mirrors CustomerEvidence.prospectId's own reasoning).
+  prospectId String   @map("prospect_id")
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict)
+
+  /// Immutable once recorded (§14).
+  rawContent String @map("raw_content")
+
+  /// One of RESPONSE_CLASSIFICATIONS; null until responseAnalystService runs.
+  classification String?
+
+  status String @default("RECEIVED")
+
+  enteredByIdentityId String   @map("entered_by_identity_id")
+  enteredByIdentity   Identity @relation(fields: [enteredByIdentityId], references: [id], onDelete: Restrict)
+
+  recordedAt DateTime  @default(now()) @map("recorded_at")
+  analyzedAt DateTime? @map("analyzed_at")
+
+  customerEvidence CustomerEvidence[]
+
+  @@index([outreachMessageId])
+  @@index([prospectId])
+  @@index([status])
+  @@map("customer_responses")
+}
+
+/// Wraps one real M4 Evidence row (sourceType="CUSTOMER") with the
+/// M5-specific structured fields a customer response actually needs
+/// (§16-17) — append-only, no status (matches ClaimEvidence's own
+/// append-only-no-status precedent). `signalType` is the safety-critical
+/// dimension: only signal types CUSTOMER_SIGNAL_ELIGIBLE_CLAIM_TYPES
+/// actually authorizes for a given claim type are ever offered to the
+/// Evidence Validator as candidates for it (domain/customer-evidence/signal-routing.ts).
+model CustomerEvidence {
+  id String @id @default(cuid())
+
+  responseId String           @map("response_id")
+  response   CustomerResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+
+  /// The real Evidence row this wraps — Restrict: must never be deleted out from under it (§22).
+  evidenceId String   @map("evidence_id")
+  evidence   Evidence @relation(fields: [evidenceId], references: [id], onDelete: Restrict)
+
+  /// Denormalized from response.prospectId — direct organizationKey/independence lookups without a join chain (§18).
+  prospectId String   @map("prospect_id")
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict)
+
+  /// One of CUSTOMER_SIGNAL_TYPES (customer-signal.types.ts).
+  signalType       String  @map("signal_type")
+  /// Only set when signalType="OBJECTION" — which claim type the objection is actually about (signal-routing.ts).
+  relatedClaimType String? @map("related_claim_type")
+
+  strength   String
+  directness String
+
+  extractedByAgentId String @map("extracted_by_agent_id")
+  extractedByAgent   Agent  @relation(fields: [extractedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([responseId])
+  @@index([evidenceId])
+  @@index([prospectId])
+  @@map("customer_evidence")
+}
+
+/// One experiment's findings (§22, brief §29) — mirrors InvestmentMemo's
+/// own shape and append-only discipline, but a distinct entity: the
+/// audience-moment (one experiment's findings) and field list
+/// (prospects contacted, independent orgs, claims strengthened/
+/// weakened) genuinely differ from an Investment Memo's (one
+/// opportunity's overall go/no-go case). humanDecision/humanReason/
+/// decidedAt/decidedByIdentityId are filled in by exactly one later
+/// update, the same "starts undecided, completed by a single human
+/// action" shape ApprovalRequest itself already uses.
+model CustomerDiscoveryMemo {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  experimentId String             @map("experiment_id")
+  experiment   OutreachExperiment @relation(fields: [experimentId], references: [id], onDelete: Restrict)
+
+  ceoRecommendationId String            @map("ceo_recommendation_id")
+  ceoRecommendation   CeoRecommendation @relation(fields: [ceoRecommendationId], references: [id], onDelete: Restrict)
+
+  chairmanReviewId String         @map("chairman_review_id")
+  chairmanReview   ChairmanReview @relation(fields: [chairmanReviewId], references: [id], onDelete: Restrict)
+
+  /// JSON-encoded full structured memo body (every brief §29-named section: prospects contacted, responses, independent orgs, problem/WTP/urgency/negative evidence, major objections, remaining uncertainty).
+  content String
+
+  /// MANDATORY, own columns (never buried in content JSON) — mirrors InvestmentMemo's own strongestArgumentAgainst/investmentThesis treatment.
+  claimsStrengthened           String @map("claims_strengthened")
+  claimsWeakened               String @map("claims_weakened")
+  independentOrganizationCount Int    @map("independent_organization_count")
+  responseCount                Int    @map("response_count")
+  recommendation               String
+  confidence                   Float
+
+  /// One of CUSTOMER_DISCOVERY_HUMAN_DECISIONS; null until the Human Owner decides (§30).
+  humanDecision       String?   @map("human_decision")
+  humanReason         String?   @map("human_reason")
+  decidedAt           DateTime? @map("decided_at")
+  decidedByIdentityId String?   @map("decided_by_identity_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([opportunityId])
+  @@index([experimentId])
+  @@map("customer_discovery_memos")
 }

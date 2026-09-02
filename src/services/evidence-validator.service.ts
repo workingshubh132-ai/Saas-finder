@@ -2,9 +2,11 @@ import type { Evidence } from "@prisma/client";
 import { z } from "zod";
 import { claimEvidenceRepository } from "../db/repositories/claim-evidence.repository.js";
 import { opportunityRepository } from "../db/repositories/opportunity.repository.js";
+import { prospectRepository } from "../db/repositories/prospect.repository.js";
 import { signalRepository } from "../db/repositories/signal.repository.js";
 import { validationReportRepository } from "../db/repositories/validation-report.repository.js";
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
+import { isClaimType } from "../domain/claim/claim.types.js";
 import { CLAIM_EVIDENCE_RELATIONSHIPS, type ClaimEvidenceRelationship } from "../domain/claim/claim-evidence.types.js";
 import { CLAIM_VALIDATION_STATUSES } from "../domain/claim/claim-validation.types.js";
 import {
@@ -15,14 +17,17 @@ import {
 } from "../domain/claim/evidence-quality.js";
 import { computeRecencyScore } from "../domain/claim/freshness-policy.js";
 import { classifyIndependence, type IndependenceInput } from "../domain/claim/independence.js";
+import { isCustomerSignalType } from "../domain/customer-evidence/customer-signal.types.js";
+import { isSignalEligibleForClaim } from "../domain/customer-evidence/signal-routing.js";
 import { specificityScore } from "../domain/signal/signal-quality.js";
-import { NotFoundError } from "../domain/shared/errors.js";
+import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { toJsonString } from "../domain/shared/json.js";
 import type { SearchToolOutput } from "../tools/source-search.tool.js";
 import { toolRegistry } from "../tools/tool-registry.js";
 import { agentRuntimeService, type ExecutionBudget, type RunOutcome } from "./agent-runtime.service.js";
 import { auditService } from "./audit.service.js";
 import { claimRepository } from "../db/repositories/claim.repository.js";
+import { customerEvidenceService } from "./customer-evidence.service.js";
 import { completeWithValidation } from "./model-output.js";
 import { promoteSignalsToEvidence } from "./opportunity-analyst.service.js";
 import { signalService } from "./signal.service.js";
@@ -221,6 +226,10 @@ export const evidenceValidatorService = {
   async run(params: RunEvidenceValidatorParams): Promise<RunOutcome<EvidenceValidatorResult>> {
     const claim = await claimRepository.findById(params.claimId);
     if (!claim) throw new NotFoundError("Claim", params.claimId);
+    const claimType = claim.claimType;
+    if (!isClaimType(claimType)) {
+      throw new ValidationError(`Corrupt stored claimType on claim ${claim.id}: ${claimType}`);
+    }
 
     const execution = await agentRuntimeService.startExecution({
       agentId: params.agentId,
@@ -258,6 +267,24 @@ export const evidenceValidatorService = {
           }
         }
 
+        // Signal-type routing (docs/M5_ARCHITECTURE_PROPOSAL.md §17, brief §19) — the milestone's most
+        // safety-critical single check: a customer-derived Evidence row is only ever offered to the
+        // Validator as a candidate for THIS claimType when its own CustomerEvidence.signalType (or, for
+        // an OBJECTION, its relatedClaimType) is actually eligible. Non-customer evidence is unaffected.
+        // Structural, not merely a prompt instruction — INTEREST-tagged evidence is removed from the pool
+        // entirely before a WILLINGNESS_TO_PAY claim's prompt is even built, regardless of wording.
+        const customerEvidenceRecords = await customerEvidenceService.listForOpportunity(claim.opportunityId);
+        const customerEvidenceByEvidenceId = new Map(customerEvidenceRecords.map((ce) => [ce.evidenceId, ce] as const));
+        for (const evidenceId of Array.from(evidencePool.keys())) {
+          const customerEvidence = customerEvidenceByEvidenceId.get(evidenceId);
+          if (!customerEvidence) continue;
+          if (!isCustomerSignalType(customerEvidence.signalType)) continue;
+          const relatedClaimType = customerEvidence.relatedClaimType && isClaimType(customerEvidence.relatedClaimType) ? customerEvidence.relatedClaimType : null;
+          if (!isSignalEligibleForClaim(customerEvidence.signalType, claimType, relatedClaimType)) {
+            evidencePool.delete(evidenceId);
+          }
+        }
+
         handle.step();
         const now = new Date();
         const factors = await Promise.all(Array.from(evidencePool.values()).map((e) => computeEvidenceFactors(e, now)));
@@ -289,7 +316,17 @@ export const evidenceValidatorService = {
         const independenceInputs: IndependenceInput[] = await Promise.all(
           supportingFactors.map(async (f): Promise<IndependenceInput> => {
             const signal = f.evidence.signalId ? await signalRepository.findById(f.evidence.signalId) : null;
-            return { evidenceId: f.evidence.id, source: f.evidence.source, sourceType: f.evidence.sourceType, sourceGroupKey: signal?.sourceGroupKey ?? null };
+            // M5 (docs/M5_ARCHITECTURE_PROPOSAL.md §18) — ten employees from the same company are one
+            // organization's worth of corroboration, never ten independent customers.
+            const customerEvidence = customerEvidenceByEvidenceId.get(f.evidence.id);
+            const prospect = customerEvidence ? await prospectRepository.findById(customerEvidence.prospectId) : null;
+            return {
+              evidenceId: f.evidence.id,
+              source: f.evidence.source,
+              sourceType: f.evidence.sourceType,
+              sourceGroupKey: signal?.sourceGroupKey ?? null,
+              organizationKey: prospect?.organization ?? null,
+            };
           }),
         );
         const independence = classifyIndependence(independenceInputs);

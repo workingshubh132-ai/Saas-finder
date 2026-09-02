@@ -3,17 +3,20 @@ import { summarizeCalibration } from "../../src/domain/decision/calibration.js";
 
 describe("summarizeCalibration", () => {
   it("flags insufficient sample size below the threshold", () => {
-    const result = summarizeCalibration([{ confidenceAtDecision: 0.5, humanDecision: "APPROVED" }]);
+    const result = summarizeCalibration([{ confidenceAtDecision: 0.5, humanDecision: "APPROVED" }], "APPROVED");
     expect(result.insufficientSampleSize).toBe(true);
     expect(result.totalDecisions).toBe(1);
   });
 
   it("buckets by confidence range and computes approval rate per bucket", () => {
-    const result = summarizeCalibration([
-      { confidenceAtDecision: 0.85, humanDecision: "APPROVED" },
-      { confidenceAtDecision: 0.9, humanDecision: "APPROVED" },
-      { confidenceAtDecision: 0.1, humanDecision: "REJECTED" },
-    ]);
+    const result = summarizeCalibration(
+      [
+        { confidenceAtDecision: 0.85, humanDecision: "APPROVED" },
+        { confidenceAtDecision: 0.9, humanDecision: "APPROVED" },
+        { confidenceAtDecision: 0.1, humanDecision: "REJECTED" },
+      ],
+      "APPROVED",
+    );
     const highBucket = result.buckets.find((b) => b.range === "0.8-1.0")!;
     expect(highBucket.count).toBe(2);
     expect(highBucket.approvedRate).toBe(1);
@@ -24,15 +27,39 @@ describe("summarizeCalibration", () => {
   });
 
   it("never fabricates an approval rate for an empty bucket", () => {
-    const result = summarizeCalibration([{ confidenceAtDecision: 0.9, humanDecision: "APPROVED" }]);
+    const result = summarizeCalibration([{ confidenceAtDecision: 0.9, humanDecision: "APPROVED" }], "APPROVED");
     const emptyBucket = result.buckets.find((b) => b.range === "0.0-0.2")!;
     expect(emptyBucket.count).toBe(0);
     expect(emptyBucket.approvedRate).toBeNull();
   });
 
   it("excludes records with no confidence recorded from every bucket, but still counts them in totalDecisions", () => {
-    const result = summarizeCalibration([{ confidenceAtDecision: null, humanDecision: "APPROVED" }]);
+    const result = summarizeCalibration([{ confidenceAtDecision: null, humanDecision: "APPROVED" }], "APPROVED");
     expect(result.totalDecisions).toBe(1);
     expect(result.buckets.every((b) => b.count === 0)).toBe(true);
+  });
+
+  it("uses whichever positiveDecision label the caller passes — never hardcoded to M4's own \"APPROVED\" (docs/M5_ARCHITECTURE_PROPOSAL.md §32)", () => {
+    const result = summarizeCalibration(
+      [
+        { confidenceAtDecision: 0.9, humanDecision: "APPROVE" },
+        { confidenceAtDecision: 0.85, humanDecision: "STOP" },
+      ],
+      "APPROVE",
+    );
+    const highBucket = result.buckets.find((b) => b.range === "0.8-1.0")!;
+    expect(highBucket.count).toBe(2);
+    expect(highBucket.approvedCount).toBe(1);
+    expect(highBucket.approvedRate).toBe(0.5);
+
+    // The same records against M4's own label would find zero matches — proving the label is never assumed.
+    const withWrongLabel = summarizeCalibration(
+      [
+        { confidenceAtDecision: 0.9, humanDecision: "APPROVE" },
+        { confidenceAtDecision: 0.85, humanDecision: "STOP" },
+      ],
+      "APPROVED",
+    );
+    expect(withWrongLabel.buckets.find((b) => b.range === "0.8-1.0")!.approvedCount).toBe(0);
   });
 });

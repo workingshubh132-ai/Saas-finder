@@ -6,15 +6,21 @@ import { authorizeRouter } from "./routes/authorize.routes.js";
 import { ceoRecommendationsRouter } from "./routes/ceo-recommendations.routes.js";
 import { claimsRouter } from "./routes/claims.routes.js";
 import { competitorsRouter } from "./routes/competitors.routes.js";
+import { customerDiscoveryMemosRouter } from "./routes/customer-discovery-memos.routes.js";
+import { customerResponsesRouter } from "./routes/customer-responses.routes.js";
 import { decisionCyclesRouter } from "./routes/decision-cycles.routes.js";
 import { decisionRecordsRouter } from "./routes/decision-records.routes.js";
 import { decisionsRouter } from "./routes/decisions.routes.js";
 import { evidenceRouter } from "./routes/evidence.routes.js";
 import { eventsRouter } from "./routes/events.routes.js";
+import { icpProfilesRouter } from "./routes/icp-profiles.routes.js";
 import { identitiesRouter } from "./routes/identities.routes.js";
 import { investmentMemosRouter } from "./routes/investment-memos.routes.js";
 import { opportunitiesRouter } from "./routes/opportunities.routes.js";
+import { outreachExperimentsRouter } from "./routes/outreach-experiments.routes.js";
+import { outreachMessagesRouter } from "./routes/outreach-messages.routes.js";
 import { problemsRouter } from "./routes/problems.routes.js";
+import { prospectsRouter } from "./routes/prospects.routes.js";
 import { researchCyclesRouter } from "./routes/research-cycles.routes.js";
 import { researchQueueRouter } from "./routes/research-queue.routes.js";
 import { researchRouter } from "./routes/research.routes.js";
@@ -55,6 +61,13 @@ export function createApp(): Express {
   app.use("/api/ceo-recommendations", ceoRecommendationsRouter);
   app.use("/api/investment-memos", investmentMemosRouter);
   app.use("/api/decision-records", decisionRecordsRouter);
+  // M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §23.
+  app.use("/api/icp-profiles", icpProfilesRouter);
+  app.use("/api/prospects", prospectsRouter);
+  app.use("/api/outreach-experiments", outreachExperimentsRouter);
+  app.use("/api/outreach-messages", outreachMessagesRouter);
+  app.use("/api/customer-responses", customerResponsesRouter);
+  app.use("/api/customer-discovery-memos", customerDiscoveryMemosRouter);
 
   app.use(errorHandler);
 

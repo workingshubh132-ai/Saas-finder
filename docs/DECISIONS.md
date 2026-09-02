@@ -722,3 +722,155 @@ indirection is speculative infrastructure this codebase's own
 discipline argues against — a direct call is simpler, equally testable,
 and trivially upgradable to a real subscriber the day a second consumer
 actually exists (`docs/M4_ARCHITECTURE_PROPOSAL.md` §29).
+
+## M5 decisions
+
+## 43. `outreach-experiments.routes.ts` gates every route — including plain reads — behind `requireHuman()`
+
+Every other M5 router (`prospects`, `outreach-messages`,
+`customer-responses`, `icp-profiles`) follows the M1-M4 convention:
+`requireAuth()` for reads and agent-executable actions, `requireHuman()`
+reserved for the one privileged safety gate each router owns.
+`outreach-experiments.routes.ts` is the exception — its two `GET`s and
+its general `POST /:id/status` are `requireHuman()` too, not just
+`POST /` (create) and `POST /:id/approve` (the first hard gate).
+**Considered:** loosening the two `GET`s to `requireAuth()` for
+consistency with the other five routers. **Rejected, for now:** the
+effect is fail-*closed* (an agent identity cannot read experiment state
+over HTTP; internal orchestration never goes through HTTP anyway, so
+nothing in this build is actually blocked by it) rather than fail-open,
+so it is not a vulnerability — and `OutreachExperiment` is genuinely the
+point where real, named prospects start being targeted, which is a
+defensible reason to hold reads to a higher bar than M1-M4's own
+convention would suggest. Recorded here so a future reader sees a
+deliberate asymmetry, not an unexplained inconsistency
+(`docs/SECURITY.md`, M5 section).
+
+## 44. Pre-existing `qs`/`body-parser`/`express` moderate-severity advisories — recorded, not silently inherited
+
+M2-M4's own `docs/SECURITY.md` sections each claimed `npm audit
+--omit=dev` reported zero vulnerabilities. Running it again during M5's
+security review shows 3 moderate-severity advisories against `qs`,
+reached transitively through `body-parser`/`express`. `git diff HEAD --
+package.json package-lock.json` confirms M5 changed neither file — this
+is a newly-published advisory against dependencies pinned since M1
+(`docs/DECISIONS.md` #1), not a regression M5's own code introduced.
+`npm audit fix --omit=dev --dry-run` reports the identical 3 findings
+afterward — no SemVer-compatible fix exists within `express` 4.x's own
+constraint range today; the real fix is a deliberate Express
+major-version upgrade affecting every milestone's HTTP layer at once.
+**Considered:** running `npm audit fix --force` to close this out as
+part of M5. **Rejected:** a forced major-version bump is exactly the
+kind of hard-to-reverse, cross-cutting change that deserves its own
+deliberate decision and full regression pass, not a side effect of an
+M5 documentation task — recorded as a known, pre-existing gap instead
+of silently carried forward the way the unchanged "zero vulnerabilities"
+wording in an untouched section would otherwise have implied.
+
+## 45. `buildDevProspectFixture`'s "organization" field: a real truncation bug the M5 capstone test caught
+
+`prospectResearcherService`'s dev fixture built each discovered
+prospect's `organization` field as `` `[DEV FIXTURE] Participant in
+discussion: "${r.title}"`.slice(0, 200) `` — the per-result
+discriminator (`#${index + 1}`) lived inside `r.title`, appended at the
+very *end* of the string, after the ICP-derived query text. When an
+ICP's role/industry/problemExposure text was long enough (routine once
+`icpAnalystService`'s dev fixture starts deriving `role` from a real
+`CUSTOMER_SEGMENT` claim's own full statement text), the outer
+`.slice(0, 200)` truncated *before* reaching the discriminator, so all
+3 prospects discovered from one research call silently collapsed to the
+*same* `organization` string. This corrupts the exact independence
+signal M5's entire negative-path safety logic depends on (`docs/M5_ARCHITECTURE_PROPOSAL.md`
+§18, §20 — 3-independent-organizations is `STOP_EXPERIMENT`'s own
+trigger condition) — the failure direction is conservative (fewer
+apparent independent organizations, never more), so it is not a safety
+hole, but it is a real correctness bug, not a cosmetic one. Caught by
+`tests/integration/m5-end-to-end.test.ts`'s negative-path capstone
+test asserting `new Set(respondents.map(p => p.organization)).size ===
+3` before this fix — the assertion failed with `1`, not `3`. **Fixed**
+by moving the discriminator to the *front* of the string
+(`` `[DEV FIXTURE] Participant #${sourceIndex + 1} in discussion:
+"${r.title}"` ``), so it survives truncation regardless of how long the
+ICP-derived query text is. Same "verify before claiming done"
+discipline as every other real bug this build has caught (#37).
+
+## 46. `Prospect.qualificationStatus` and `Prospect.status` are deliberately two different fields, not redundant
+
+`qualificationStatus` (`QUALIFIED`/`REJECTED`/`UNQUALIFIED`) is Prospect
+Qualification's own finer-grained assessment; `status` is the coarser,
+12-value lifecycle state machine every other M5 service actually
+transitions against. `prospectQualificationService`'s own
+`statusForQualification` collapses both `REJECTED` and `UNQUALIFIED`
+qualificationStatus values to the same lifecycle `status: "REJECTED"` —
+deliberately, since "does not proceed" is the only lifecycle-relevant
+fact, while a human reading the record still benefits from knowing
+*which* of the two it was (excluded outright vs. genuinely unclear from
+public information). **Considered:** a single combined field.
+**Rejected:** collapsing them would silently lose the
+excluded-vs-unclear distinction the qualification prompt is explicitly
+instructed to preserve (`PROSPECT_QUALIFICATION_SYSTEM_PROMPT`'s own
+"an honest, valid outcome, never forced" framing for `UNQUALIFIED`).
+
+## 47. The CEO's customer-discovery recommendation never auto-creates an `OutreachExperiment`
+
+`ceoReasoningService.recommendCustomerDiscoveryAction` can recommend
+`RUN_CUSTOMER_DISCOVERY` or `TEST_CLAIM` — both naturally read as "start
+testing this claim with real prospects" — but the service only ever
+writes a `CeoRecommendation` row; it never itself calls
+`outreachExperimentService.create`. **Considered:** auto-creating a
+`PENDING_APPROVAL` experiment for these two actions specifically, since
+it still can't reach a real prospect without the separate, unchanged
+`approve` hard gate. **Rejected** as the riskier reading of an
+ambiguous line in this project's own earlier architecture proposal:
+every other CEO action in this codebase (M4's `KILL`/`PREPARE_REVIEW`/
+`HUMAN_REVIEW`) is already decoupled from mutation — the CEO
+recommends, a human or a separate explicit service call acts. Customer
+discovery is the one place that decoupling matters most (real people
+end up contacted at the end of the chain it would start), so the same
+"recommend only" discipline applies without exception, not a
+milestone-specific carve-out.
+
+## 48. Cost controls: no new mechanism, verified rather than assumed
+
+M5's five new agents each declare their own `Partial<ExecutionBudget>`
+override (`ICP_ANALYST_BUDGET`, `PROSPECT_RESEARCHER_BUDGET`,
+`PROSPECT_QUALIFICATION_BUDGET`, `MESSAGE_DRAFTER_BUDGET`,
+`RESPONSE_ANALYST_BUDGET`) through the same, unmodified
+`agentRuntimeService` every M2-M4 agent already uses — no new budget
+mechanism, no new `Permission`, no new risk level. `DEFAULT_OUTREACH_LIMITS`
+(§26) is the one genuinely new layer, and it bounds *volume* (prospects/
+messages per day/experiment), not spend. A repo-wide grep for
+`estimatedCostUsd`/`maxCostUsd` in `src/services/` turns up exactly one
+file — `research-cycle.service.ts`, unchanged since M3 — confirming
+directly, not just by inference from the Phase 0 proposal, that M5
+introduces no new dollar-denominated cost tracking or ceiling. The
+`AgentExecution.estimatedCostUsd` gap (real usage isn't reported by the
+provider in this environment) is unchanged from M2-M4 and stays exactly
+as honestly documented there — carried forward, never quietly implied
+to be solved by a milestone that didn't touch it.
+
+## 49. `summarizeCalibration` gains a required `positiveDecision` parameter, rather than a second near-duplicate function
+
+M5 extends calibration tracking (§32) to `CustomerDiscoveryMemo.confidence`
+vs. `CustomerDiscoveryMemo.humanDecision` — the same shape as M4's
+`DecisionRecord.confidenceAtDecision`/`humanDecision`, except the
+"positive" label differs (`"APPROVE"` vs. `"APPROVED"`). **Considered:**
+a second, near-identical `summarizeCustomerDiscoveryCalibration`
+function duplicating the bucketing loop. **Rejected:** the bucketing
+algorithm is real, non-trivial logic (five boundaries, a last-bucket
+inclusive edge, an honest-null policy for missing confidence) — cloning
+it would violate this codebase's own "three similar lines is fine, a
+whole duplicated function is not" line. Instead `summarizeCalibration`
+takes `positiveDecision` as a required (never defaulted) parameter, so
+`calibrationService.summarize()` and the new
+`calibrationService.summarizeCustomerDiscovery()` are each explicit
+about which label they mean rather than silently sharing M4's own
+hardcoded one. `CalibrationBucket`'s field names (`approvedCount`/
+`approvedRate`) were deliberately left unrenamed — they read naturally
+for `"APPROVE"` too, and renaming them would be a breaking change to
+`GET /api/decision-records/calibration-summary`'s existing M4 response
+shape for a purely cosmetic gain. A memo with `humanDecision: null`
+(not yet decided) is filtered out in `calibrationService.summarizeCustomerDiscovery`
+itself, before the shared function ever sees it — undecided is not the
+same honest fact as decided-and-rejected, and conflating them would
+silently understate the approval rate.

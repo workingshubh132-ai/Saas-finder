@@ -1,10 +1,11 @@
-import type { Agent, Opportunity, Problem, SignalCluster } from "@prisma/client";
+import type { Agent, Opportunity, Problem, Prospect, SignalCluster } from "@prisma/client";
 import { agentService, type CreateAgentParams } from "../src/services/agent.service.js";
 import { signalClusterRepository } from "../src/db/repositories/signal-cluster.repository.js";
 import { opportunityService } from "../src/services/opportunity.service.js";
 import type { OpportunityScoreDimensions } from "../src/services/opportunity-scorer.js";
 import type { KillRiskDimensions } from "../src/services/kill-risk-scorer.js";
 import { problemService } from "../src/services/problem.service.js";
+import { prospectService, type CreateProspectParams } from "../src/services/prospect.service.js";
 import { humanOwner } from "./setup.js";
 
 export { humanOwner as HUMAN_OWNER } from "./setup.js";
@@ -126,6 +127,11 @@ export interface FullAgentSet {
   opportunityAgent: Agent;
   validatorAgent: Agent;
   ceoAgent: Agent;
+  /** M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §24. Zero grants, like ceoAgent/opportunityAgent (pure reasoning over already-provided data). */
+  icpAnalystAgent: Agent;
+  prospectQualificationAgent: Agent;
+  messageDrafterAgent: Agent;
+  responseAnalystAgent: Agent;
 }
 
 /** Every agent role M3+M4's pipelines need, correctly permissioned (docs/M4_ARCHITECTURE_PROPOSAL.md §23). */
@@ -140,5 +146,26 @@ export async function makeFullAgentSet(): Promise<FullAgentSet> {
   const validatorAgent = await makeAgent({ role: "Evidence Validator" });
   await agentService.grantPermission({ agentId: validatorAgent.id, permission: "READ_WEB", grantedBy: humanOwner });
   const ceoAgent = await makeAgent({ role: "CEO" });
-  return { researchAgent, problemAgent, competitorAgent, marketAgent, opportunityAgent, validatorAgent, ceoAgent };
+  const icpAnalystAgent = await makeAgent({ role: "ICP Analyst" });
+  const prospectQualificationAgent = await makeAgent({ role: "Prospect Qualification" });
+  const messageDrafterAgent = await makeAgent({ role: "Message Drafter" });
+  const responseAnalystAgent = await makeAgent({ role: "Response Analyst" });
+  return { researchAgent, problemAgent, competitorAgent, marketAgent, opportunityAgent, validatorAgent, ceoAgent, icpAnalystAgent, prospectQualificationAgent, messageDrafterAgent, responseAnalystAgent };
+}
+
+/** A DISCOVERED Prospect with plausible defaults — override organization/role/icpProfileId to test specific qualification outcomes (docs/M5_ARCHITECTURE_PROPOSAL.md §4-5). */
+export async function makeProspect(overrides: Partial<Omit<CreateProspectParams, "actorType" | "actorId">> & Pick<CreateProspectParams, "opportunityId" | "icpProfileId">): Promise<Prospect> {
+  counter += 1;
+  const agent = overrides.discoveredByAgentId ? null : await makeAgent({ role: "Prospect Researcher" });
+  return prospectService.create({
+    organization: `Test Org ${counter}`,
+    role: "Small business owner",
+    publicContactChannel: `https://dev-fixture.local/test-prospect-${counter}`,
+    source: "hacker_news",
+    sourceUrl: `https://dev-fixture.local/test-prospect-${counter}`,
+    discoveredByAgentId: agent?.id ?? (overrides.discoveredByAgentId as string),
+    actorType: "SYSTEM",
+    actorId: null,
+    ...overrides,
+  });
 }

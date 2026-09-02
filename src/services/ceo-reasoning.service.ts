@@ -2,10 +2,14 @@ import type { Claim, CeoRecommendation, ValidationReport } from "@prisma/client"
 import { z } from "zod";
 import { ceoRecommendationRepository } from "../db/repositories/ceo-recommendation.repository.js";
 import { claimRepository } from "../db/repositories/claim.repository.js";
+import { customerResponseRepository } from "../db/repositories/customer-response.repository.js";
+import { outreachExperimentRepository } from "../db/repositories/outreach-experiment.repository.js";
 import { opportunityRepository } from "../db/repositories/opportunity.repository.js";
+import { prospectRepository } from "../db/repositories/prospect.repository.js";
 import { validationReportRepository } from "../db/repositories/validation-report.repository.js";
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
 import { CEO_DECISION_ACTIONS } from "../domain/decision/decision-action.types.js";
+import { CUSTOMER_DISCOVERY_ACTIONS } from "../domain/decision/customer-discovery-action.types.js";
 import { computeDecisionPriority, PLACEHOLDER_NEUTRAL_SCORE } from "../domain/decision/priority.js";
 import { ValidationError } from "../domain/shared/errors.js";
 import { toJsonString } from "../domain/shared/json.js";
@@ -60,6 +64,134 @@ const CEO_SYSTEM_PROMPT =
   'Respond with ONLY JSON matching: {"action": "KILL"|"DEPRIORITIZE"|"INVESTIGATE"|"VALIDATE_CUSTOMER"|' +
   '"PREPARE_REVIEW"|"HUMAN_REVIEW", "reasoning": string, "citedClaimIds": string[], "citedValidationReportIds": ' +
   'string[], "confidence": number}';
+
+const customerDiscoveryDecisionSchema = z.object({
+  action: z.enum(CUSTOMER_DISCOVERY_ACTIONS),
+  reasoning: z.string().min(1),
+  citedClaimIds: z.array(z.string().min(1)).min(1),
+  /** Only meaningful for TEST_CLAIM — which specific claim customer discovery should test next. Null for every other action. */
+  targetClaimId: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+});
+type CustomerDiscoveryDecision = z.infer<typeof customerDiscoveryDecisionSchema>;
+
+interface CustomerDiscoveryExperimentSummary {
+  experimentId: string;
+  claimId: string;
+  responseCount: number;
+  analyzedCount: number;
+  negativeCount: number;
+  independentOrganizations: number;
+}
+
+const CEO_CUSTOMER_DISCOVERY_SYSTEM_PROMPT =
+  "You are the CEO of VentureForge, now deciding a customer-discovery step (docs/M5_ARCHITECTURE_PROPOSAL.md §20, " +
+  "§26-27; CONSTITUTION.md). This is a DIFFERENT question from your usual KILL/DEPRIORITIZE/etc. decision: given the " +
+  "opportunity's claims, their validation status, unresolved evidence gaps, and (if one exists) the current outreach " +
+  "experiment's own responses so far, decide what customer-discovery step is worth taking next. You have no tools " +
+  "and cannot search or contact anyone yourself. Choose exactly one action: RUN_CUSTOMER_DISCOVERY (no discovery has " +
+  "started yet and a real claim is worth testing with real prospects); TEST_CLAIM (a SPECIFIC claim — name it in " +
+  "targetClaimId — is the highest-value thing to learn next, whether starting fresh or refining an active " +
+  "experiment); REFINE_ICP (the current targeting looks wrong — too broad, too narrow, or evidence suggests the " +
+  "wrong audience); STOP_EXPERIMENT (the active experiment has enough independent negative signal, or has run its " +
+  "course, and continuing would not change the answer); REQUEST_HUMAN_REVIEW (you cannot confidently resolve this " +
+  "yourself — an honest, valid outcome). Optimize for expected decision impact per unit of effort: prefer testing " +
+  "whichever claim has the largest unresolved evidence gap. Every recommendation MUST cite the specific claim ids " +
+  "that justify it. You NEVER send messages or contact anyone — you only recommend. " +
+  'Respond with ONLY JSON matching: {"action": "RUN_CUSTOMER_DISCOVERY"|"REFINE_ICP"|"TEST_CLAIM"|"STOP_EXPERIMENT"|' +
+  '"REQUEST_HUMAN_REVIEW", "reasoning": string, "citedClaimIds": string[], "targetClaimId": string|null, ' +
+  '"confidence": number}';
+
+function buildCustomerDiscoveryPrompt(
+  opportunity: { title: string; opportunityScore: number | null; confidenceScore: number | null },
+  claims: readonly Claim[],
+  latestReportByClaimId: ReadonlyMap<string, ValidationReport>,
+  topGap: { claimId: string | null; description: string; impactScore: number } | null,
+  experiment: CustomerDiscoveryExperimentSummary | null,
+): string {
+  const claimLines = claims.map((c) => {
+    const report = latestReportByClaimId.get(c.id);
+    return (
+      `- [id=${c.id}] [${c.claimType}] importance=${c.importance} status=${c.status} confidence=${c.confidence.toFixed(2)}: ${c.statement}` +
+      (report ? ` | latest validation: ${report.reasoning}` : " | not yet validated")
+    );
+  });
+
+  return [
+    `Opportunity: ${opportunity.title}`,
+    `Opportunity score: ${opportunity.opportunityScore ?? "not yet scored"}`,
+    `Confidence score: ${opportunity.confidenceScore ?? "not yet scored"}`,
+    "",
+    `Claims (${claims.length}):`,
+    ...(claimLines.length > 0 ? claimLines : ["(none extracted yet)"]),
+    "",
+    topGap
+      ? `Highest-impact unresolved gap: [claimId=${topGap.claimId ?? "none"}] ${topGap.description} (impact=${topGap.impactScore.toFixed(2)})`
+      : "No unresolved evidence gaps.",
+    "",
+    experiment
+      ? `Active outreach experiment [id=${experiment.experimentId}] testing claim [id=${experiment.claimId}]: ${experiment.responseCount} response(s) received, ${experiment.analyzedCount} analyzed, ${experiment.negativeCount} negative, ${experiment.independentOrganizations} independent organization(s) represented.`
+      : "No active outreach experiment for this opportunity yet.",
+  ].join("\n");
+}
+
+const STOP_EXPERIMENT_MIN_INDEPENDENT_NEGATIVE = 3;
+
+/**
+ * DEVELOPMENT ONLY — deterministic, rule-based, derived from the
+ * opportunity's actual claims/gaps/experiment state, same discipline
+ * as buildDevCeoFixture. Never a static "always X" stub.
+ */
+function buildDevCustomerDiscoveryFixture(
+  claims: readonly Claim[],
+  topGap: { claimId: string | null; description: string } | null,
+  experiment: CustomerDiscoveryExperimentSummary | null,
+): CustomerDiscoveryDecision {
+  const sortedByConfidence = [...claims].sort((a, b) => a.confidence - b.confidence);
+  const fallbackClaimId = sortedByConfidence[0]?.id;
+  if (!fallbackClaimId) {
+    throw new ValidationError("Cannot produce a customer-discovery recommendation for an opportunity with no claims — run claim extraction first.");
+  }
+
+  if (experiment && experiment.negativeCount >= STOP_EXPERIMENT_MIN_INDEPENDENT_NEGATIVE && experiment.independentOrganizations >= STOP_EXPERIMENT_MIN_INDEPENDENT_NEGATIVE) {
+    return {
+      action: "STOP_EXPERIMENT",
+      reasoning: `[DEV FIXTURE] Active experiment has ${experiment.negativeCount} negative response(s) across ${experiment.independentOrganizations} independent organization(s) — continuing is unlikely to change the answer.`,
+      citedClaimIds: [experiment.claimId],
+      targetClaimId: null,
+      confidence: 0.7,
+    };
+  }
+
+  const segmentClaim = claims.find((c) => c.claimType === "CUSTOMER_SEGMENT");
+  if (segmentClaim && (segmentClaim.status === "CONTRADICTED" || segmentClaim.status === "WEAK")) {
+    return {
+      action: "REFINE_ICP",
+      reasoning: `[DEV FIXTURE] CUSTOMER_SEGMENT claim is ${segmentClaim.status} — the current targeting likely needs refinement before more outreach.`,
+      citedClaimIds: [segmentClaim.id],
+      targetClaimId: null,
+      confidence: 0.5,
+    };
+  }
+
+  if (topGap?.claimId && (!experiment || experiment.claimId !== topGap.claimId)) {
+    return {
+      action: experiment ? "TEST_CLAIM" : "RUN_CUSTOMER_DISCOVERY",
+      reasoning: `[DEV FIXTURE] Highest-impact unresolved gap targets claim ${topGap.claimId} — worth testing with real prospects next.`,
+      citedClaimIds: [topGap.claimId],
+      targetClaimId: topGap.claimId,
+      confidence: 0.6,
+    };
+  }
+
+  return {
+    action: "REQUEST_HUMAN_REVIEW",
+    reasoning: "[DEV FIXTURE] No deterministic rule confidently resolves the next customer-discovery step — an honest escalation, not a failure.",
+    citedClaimIds: [fallbackClaimId],
+    targetClaimId: null,
+    confidence: 0.3,
+  };
+}
 
 export interface RunCeoReasoningParams {
   agentId: string;
@@ -277,6 +409,124 @@ export const ceoReasoningService = {
           resourceId: params.opportunityId,
           result: "SUCCESS",
           metadata: { recommendationId: recommendation.id, confidence: decision.confidence, priorityScore },
+        });
+        await eventBus.publish({
+          type: "CEO_RECOMMENDATION_ISSUED",
+          payload: { recommendationId: recommendation.id, opportunityId: params.opportunityId, action: decision.action, confidence: decision.confidence },
+        });
+
+        return { recommendation };
+      },
+      CEO_REASONING_BUDGET,
+    );
+  },
+
+  /**
+   * The second, distinct entry point (docs/M5_ARCHITECTURE_PROPOSAL.md
+   * §20) — "what customer-discovery step is worth taking next," a
+   * genuinely different question from CEO_DECISION_ACTIONS' "what
+   * should happen to this opportunity overall," asked at a different
+   * moment. Same agent row, same zero-tool-call/zero-permission
+   * boundary, same bounded budget; stores into the SAME ceo_recommendations
+   * table (the table doesn't care which action set produced a row).
+   * Recommends only — never itself creates an OutreachExperiment or
+   * anything else; a human (via the API, §23) decides whether to act
+   * on it, the same decoupled-from-mutation discipline every other
+   * CEO action in this codebase already follows.
+   */
+  async recommendCustomerDiscoveryAction(params: RunCeoReasoningParams): Promise<RunOutcome<CeoReasoningResult>> {
+    const opportunity = await opportunityRepository.findById(params.opportunityId);
+    if (!opportunity) throw new ValidationError(`Opportunity ${params.opportunityId} not found`);
+
+    const execution = await agentRuntimeService.startExecution({
+      agentId: params.agentId,
+      taskId: null,
+      input: { opportunityId: params.opportunityId, mode: "CUSTOMER_DISCOVERY" },
+      startedBy: params.startedBy,
+    });
+
+    return agentRuntimeService.run(
+      execution.id,
+      async (handle) => {
+        handle.step();
+        const claims = await claimRepository.listForOpportunity(params.opportunityId);
+        const latestReportByClaimId = new Map<string, ValidationReport>();
+        for (const claim of claims) {
+          const report = await validationReportRepository.findLatestForClaim(claim.id);
+          if (report) latestReportByClaimId.set(claim.id, report);
+        }
+
+        const gaps = await evidenceGapService.listForOpportunity(params.opportunityId);
+        const unresolvedGaps = gaps.filter((g) => g.status !== "RESOLVED");
+        const [topGap] = [...unresolvedGaps].sort((a, b) => b.impactScore - a.impactScore);
+
+        const experiments = await outreachExperimentRepository.listForOpportunity(params.opportunityId);
+        const activeExperiment = experiments.find((e) => e.status === "ACTIVE") ?? null;
+        let experimentSummary: CustomerDiscoveryExperimentSummary | null = null;
+        if (activeExperiment) {
+          const responses = await customerResponseRepository.listForExperiment(activeExperiment.id);
+          const analyzed = responses.filter((r) => r.status === "ANALYZED");
+          const negative = analyzed.filter((r) => r.classification === "NEGATIVE_SIGNAL" || r.classification === "NOT_INTERESTED");
+          // Independent organizations, not independent prospects (docs/M5_ARCHITECTURE_PROPOSAL.md §18) — ten
+          // responses from the same company's employees is one organization's worth of corroboration.
+          const distinctProspectIds = Array.from(new Set(responses.map((r) => r.prospectId)));
+          const prospects = await Promise.all(distinctProspectIds.map((id) => prospectRepository.findById(id)));
+          const independentOrganizations = new Set(prospects.filter((p): p is NonNullable<typeof p> => p !== null).map((p) => p.organization)).size;
+          experimentSummary = {
+            experimentId: activeExperiment.id,
+            claimId: activeExperiment.claimId,
+            responseCount: responses.length,
+            analyzedCount: analyzed.length,
+            negativeCount: negative.length,
+            independentOrganizations,
+          };
+        }
+
+        const { value: decision } = await completeWithValidation(handle.callModel, customerDiscoveryDecisionSchema, {
+          systemPrompt: CEO_CUSTOMER_DISCOVERY_SYSTEM_PROMPT,
+          maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
+          messages: [
+            {
+              role: "user",
+              content: buildCustomerDiscoveryPrompt(opportunity, claims, latestReportByClaimId, topGap ? { claimId: topGap.claimId, description: topGap.description, impactScore: topGap.impactScore } : null, experimentSummary),
+            },
+          ],
+          devFixtureResponse: buildDevCustomerDiscoveryFixture(claims, topGap ? { claimId: topGap.claimId, description: topGap.description } : null, experimentSummary),
+        });
+
+        await handle.transition("PROCESSING_RESULT");
+        handle.step();
+
+        const priorityScore = computeDecisionPriority({
+          opportunityScore: opportunity.opportunityScore ?? 0,
+          confidenceScore: opportunity.confidenceScore ?? 0,
+          killRiskScore: 0,
+          topEvidenceGapImpactScore: topGap?.impactScore ?? 0,
+          maxClaimEIG: topGap?.impactScore ?? 0,
+          estimatedResearchCost: PLACEHOLDER_NEUTRAL_SCORE,
+          timeSensitivityScore: PLACEHOLDER_NEUTRAL_SCORE,
+          strategicFitScore: PLACEHOLDER_NEUTRAL_SCORE,
+        });
+
+        const recommendation = await ceoRecommendationRepository.create({
+          opportunityId: params.opportunityId,
+          decisionCycleId: params.decisionCycleId ?? null,
+          action: decision.action,
+          reasoning: decision.reasoning,
+          citedClaimIds: toJsonString(decision.citedClaimIds),
+          citedValidationReportIds: toJsonString([]),
+          confidence: decision.confidence,
+          priorityScore,
+        });
+
+        await auditService.record({
+          actorType: "AGENT",
+          actorId: params.agentId,
+          action: `CEO_CUSTOMER_DISCOVERY_RECOMMENDATION_${decision.action}`,
+          resourceType: "OPPORTUNITY",
+          resourceId: params.opportunityId,
+          result: "SUCCESS",
+          metadata: { recommendationId: recommendation.id, confidence: decision.confidence, targetClaimId: decision.targetClaimId },
         });
         await eventBus.publish({
           type: "CEO_RECOMMENDATION_ISSUED",
