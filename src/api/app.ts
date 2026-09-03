@@ -11,6 +11,7 @@ import { customerResponsesRouter } from "./routes/customer-responses.routes.js";
 import { decisionCyclesRouter } from "./routes/decision-cycles.routes.js";
 import { decisionRecordsRouter } from "./routes/decision-records.routes.js";
 import { decisionsRouter } from "./routes/decisions.routes.js";
+import { engineeringTasksRouter } from "./routes/engineering-tasks.routes.js";
 import { evidenceRouter } from "./routes/evidence.routes.js";
 import { eventsRouter } from "./routes/events.routes.js";
 import { icpProfilesRouter } from "./routes/icp-profiles.routes.js";
@@ -20,6 +21,8 @@ import { opportunitiesRouter } from "./routes/opportunities.routes.js";
 import { outreachExperimentsRouter } from "./routes/outreach-experiments.routes.js";
 import { outreachMessagesRouter } from "./routes/outreach-messages.routes.js";
 import { problemsRouter } from "./routes/problems.routes.js";
+import { productReviewMemosRouter } from "./routes/product-review-memos.routes.js";
+import { productsRouter } from "./routes/products.routes.js";
 import { prospectsRouter } from "./routes/prospects.routes.js";
 import { researchCyclesRouter } from "./routes/research-cycles.routes.js";
 import { researchQueueRouter } from "./routes/research-queue.routes.js";
@@ -68,6 +71,10 @@ export function createApp(): Express {
   app.use("/api/outreach-messages", outreachMessagesRouter);
   app.use("/api/customer-responses", customerResponsesRouter);
   app.use("/api/customer-discovery-memos", customerDiscoveryMemosRouter);
+  // M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §21.
+  app.use("/api/products", productsRouter);
+  app.use("/api/engineering-tasks", engineeringTasksRouter);
+  app.use("/api/product-review-memos", productReviewMemosRouter);
 
   app.use(errorHandler);
 

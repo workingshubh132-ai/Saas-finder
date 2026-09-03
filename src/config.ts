@@ -23,6 +23,21 @@ export const config = {
    * docs/SOURCE_ADAPTERS.md.
    */
   researchToolMode: (process.env.RESEARCH_TOOL_MODE ?? "development") as ResearchToolMode,
+
+  /**
+   * M6 (docs/M6_ARCHITECTURE_PROPOSAL.md §10) — every factory workspace
+   * lives under this directory, always a descendant of the VentureForge
+   * repo root itself. That placement is deliberate, not incidental:
+   * Node's own module resolution (and TypeScript's, which follows the
+   * same convention) walks UP from a file looking for the nearest
+   * node_modules, so generated product code can `import express from
+   * "express"` and resolve it from VentureForge's own already-installed
+   * dependency — no network-dependent `npm install` inside a generated
+   * workspace, ever (§29 cost/dependency policy). process.cwd() is the
+   * repo root in every invocation path this project already uses (npm
+   * scripts, vitest, tsx scripts/*.ts all run from the repo root).
+   */
+  factoryWorkspacesDir: `${process.cwd()}/factory-workspaces`,
 } as const;
 
 export function assertConfigValid(): void {

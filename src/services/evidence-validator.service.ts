@@ -245,7 +245,10 @@ export const evidenceValidatorService = {
         const evidencePool = new Map(existingEvidence.map((e) => [e.id, e] as const));
 
         if (params.maxSearches > 0) {
-          const sourceIds = toolRegistry.list().map((tool) => tool.id);
+          const sourceIds = toolRegistry
+            .list()
+            .filter((tool) => tool.category === "RESEARCH_SOURCE")
+            .map((tool) => tool.id);
           const query = claim.statement.slice(0, SEARCH_QUERY_MAX_LENGTH);
           for (let i = 0; i < params.maxSearches && sourceIds.length > 0; i += 1) {
             handle.step();

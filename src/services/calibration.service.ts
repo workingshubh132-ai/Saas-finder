@@ -1,5 +1,6 @@
 import { decisionRecordRepository } from "../db/repositories/decision-record.repository.js";
 import { customerDiscoveryMemoRepository } from "../db/repositories/customer-discovery-memo.repository.js";
+import { productReviewMemoRepository } from "../db/repositories/product-review-memo.repository.js";
 import { summarizeCalibration, type CalibrationSummary } from "../domain/decision/calibration.js";
 
 /**
@@ -29,6 +30,24 @@ export const calibrationService = {
    */
   async summarizeCustomerDiscovery(): Promise<CalibrationSummary> {
     const memos = await customerDiscoveryMemoRepository.list();
+    const decided = memos.filter((m): m is typeof m & { humanDecision: string } => m.humanDecision !== null);
+    return summarizeCalibration(
+      decided.map((m) => ({ confidenceAtDecision: m.confidence, humanDecision: m.humanDecision })),
+      "APPROVE",
+    );
+  },
+
+  /**
+   * Same mechanism again, M6's own data (docs/M6_ARCHITECTURE_PROPOSAL.md
+   * §29): ProductReviewMemo.confidence (min of the CEO's product-build
+   * recommendation confidence and the Chairman's own review confidence
+   * at compile time, product-review-memo.service.ts's own deliberately
+   * conservative choice) against the memo's own humanDecision. An
+   * undecided memo (humanDecision: null) is excluded, same discipline
+   * as summarizeCustomerDiscovery.
+   */
+  async summarizeProductBuilds(): Promise<CalibrationSummary> {
+    const memos = await productReviewMemoRepository.list();
     const decided = memos.filter((m): m is typeof m & { humanDecision: string } => m.humanDecision !== null);
     return summarizeCalibration(
       decided.map((m) => ({ confidenceAtDecision: m.confidence, humanDecision: m.humanDecision })),

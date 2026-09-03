@@ -3,8 +3,10 @@ import { DevelopmentSource } from "../sources/development.source.js";
 import { HackerNewsSource } from "../sources/hacker-news.source.js";
 import type { ResearchSource } from "../sources/research-source.js";
 import { StackExchangeSource } from "../sources/stack-exchange.source.js";
+import { RunWorkspaceCommandTool } from "./run-workspace-command.tool.js";
 import { SourceSearchTool } from "./source-search.tool.js";
 import { toolRegistry } from "./tool-registry.js";
+import { WriteWorkspaceFileTool } from "./write-workspace-file.tool.js";
 
 /**
  * The real research sources M3 registers (docs/M3_ARCHITECTURE_PROPOSAL.md
@@ -30,4 +32,11 @@ export function registerDefaultTools(): void {
   for (const source of sources) {
     toolRegistry.register(new SourceSearchTool(source));
   }
+
+  // M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §11, §13. The Engineering
+  // Agent's only two capabilities, always real (no dev-fixture variant
+  // — a real, disposable workspace write/command is already safe and
+  // cheap, unlike a live paid API call).
+  toolRegistry.register(new WriteWorkspaceFileTool());
+  toolRegistry.register(new RunWorkspaceCommandTool());
 }

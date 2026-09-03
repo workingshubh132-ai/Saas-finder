@@ -23,6 +23,23 @@ async function resetDatabase(): Promise<void> {
   await prisma.auditLog.deleteMany();
   await prisma.event.deleteMany();
   await prisma.memory.deleteMany();
+  // M6 leaf tables first (FK-safe order — docs/M6_ARCHITECTURE_PROPOSAL.md §34):
+  // productReviewMemo references product (Cascade)/ceoRecommendation/
+  // chairmanReview (both Restrict) so it precedes all three; security/qa/
+  // codeReview reference engineeringTask (Cascade) so they precede it;
+  // engineeringTask references mvpArchitecture (Cascade)/product (Restrict)
+  // so it precedes both; mvpArchitecture references product (Cascade)/
+  // productSpec (Restrict) so it precedes both; feature references
+  // productSpec (Cascade)/claim (Restrict) so it precedes both.
+  await prisma.productReviewMemo.deleteMany();
+  await prisma.securityReview.deleteMany();
+  await prisma.qaReport.deleteMany();
+  await prisma.codeReview.deleteMany();
+  await prisma.engineeringTask.deleteMany();
+  await prisma.mvpArchitecture.deleteMany();
+  await prisma.feature.deleteMany();
+  await prisma.productSpec.deleteMany();
+  await prisma.product.deleteMany();
   // M5 leaf tables first (FK-safe order — docs/M5_ARCHITECTURE_PROPOSAL.md §22):
   // customerDiscoveryMemo references outreachExperiment/ceoRecommendation/
   // chairmanReview (all Restrict) so it must go before all three;

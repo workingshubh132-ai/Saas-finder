@@ -66,7 +66,10 @@ export const researchAgentService = {
     });
 
     return agentRuntimeService.run(execution.id, async (handle) => {
-      const sourceIds = toolRegistry.list().map((tool) => tool.id);
+      const sourceIds = toolRegistry
+        .list()
+        .filter((tool) => tool.category === "RESEARCH_SOURCE")
+        .map((tool) => tool.id);
       if (sourceIds.length === 0) {
         throw new ToolError("No research sources are registered — call registerDefaultTools() before running the Research Agent.");
       }

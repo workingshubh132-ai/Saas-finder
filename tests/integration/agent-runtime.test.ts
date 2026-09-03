@@ -18,6 +18,7 @@ class FlakyTool implements Tool {
   readonly id = "flaky_tool";
   readonly name = "Flaky Test Tool";
   readonly description = "Fails a configurable number of times, then succeeds.";
+  readonly category = "RESEARCH_SOURCE" as const;
   readonly riskLevel = "GREEN" as const;
   readonly requiredPermissions = ["READ_WEB"] as const;
   readonly inputSchema = z.object({});
@@ -39,6 +40,7 @@ class AlwaysFailsTool implements Tool {
   readonly id = "always_fails_tool";
   readonly name = "Always Fails";
   readonly description = "Never succeeds — used to prove retries are bounded, not infinite.";
+  readonly category = "RESEARCH_SOURCE" as const;
   readonly riskLevel = "GREEN" as const;
   readonly requiredPermissions = ["READ_WEB"] as const;
   readonly inputSchema = z.object({});

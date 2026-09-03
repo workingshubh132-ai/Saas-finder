@@ -42,6 +42,7 @@ export class SourceSearchTool implements Tool {
   readonly id: string;
   readonly name: string;
   readonly description: string;
+  readonly category = "RESEARCH_SOURCE" as const;
   readonly riskLevel = "GREEN" as const;
   readonly requiredPermissions = ["READ_WEB"] as const;
   readonly inputSchema = searchToolInputSchema;

@@ -65,6 +65,14 @@ model Agent {
   outreachMessagesDrafted   OutreachMessage[]
   customerEvidenceExtracted CustomerEvidence[]
 
+  /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34.
+  productSpecsGenerated     ProductSpec[]
+  mvpArchitecturesGenerated MvpArchitecture[]
+  engineeringTasksAssigned  EngineeringTask[]
+  codeReviewsPerformed      CodeReview[]
+  qaReportsPerformed        QaReport[]
+  securityReviewsPerformed  SecurityReview[]
+
   @@index([status])
   @@index([department])
   @@map("agents")
@@ -273,6 +281,9 @@ model Opportunity {
   outreachExperiments    OutreachExperiment[]
   customerDiscoveryMemos CustomerDiscoveryMemo[]
 
+  /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34. One row per build attempt (§3).
+  products Product[]
+
   @@index([status])
   @@index([problemId])
   @@map("opportunities")
@@ -432,6 +443,8 @@ model Identity {
   /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §22.
   outreachExperimentsCreated OutreachExperiment[]
   customerResponsesEntered   CustomerResponse[]
+  /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34.
+  productsCreated            Product[]
 
   @@index([agentId])
   @@index([status])
@@ -553,6 +566,8 @@ model ChairmanReview {
   decisionRecords        DecisionRecord[]
   /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §21-22.
   customerDiscoveryMemos CustomerDiscoveryMemo[]
+  /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §33-34.
+  productReviewMemos     ProductReviewMemo[]
 
   @@index([opportunityId])
   @@map("chairman_reviews")
@@ -884,6 +899,9 @@ model Claim {
   outreachExperiments OutreachExperiment[]
   outreachMessages    OutreachMessage[]
 
+  /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34. Which claim a proposed feature tests (§6).
+  features Feature[]
+
   @@index([opportunityId])
   @@index([status])
   @@map("claims")
@@ -989,6 +1007,8 @@ model CeoRecommendation {
   decisionRecords        DecisionRecord[]
   /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §20, §22.
   customerDiscoveryMemos CustomerDiscoveryMemo[]
+  /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §32, §34.
+  productReviewMemos     ProductReviewMemo[]
 
   @@index([opportunityId])
   @@map("ceo_recommendations")
@@ -1439,4 +1459,348 @@ model CustomerDiscoveryMemo {
   @@index([opportunityId])
   @@index([experimentId])
   @@map("customer_discovery_memos")
+}
+
+// ---------------------------------------------------------------------------
+// M6 — Customer Discovery Intelligence's successor: the SaaS Factory
+// (docs/M6_ARCHITECTURE_PROPOSAL.md)
+// ---------------------------------------------------------------------------
+
+/// One build attempt at one opportunity (§3) — not a versioned family;
+/// a genuinely new attempt after REJECTED/FAILED is a new Product row
+/// referencing the same opportunityId. Starts PROPOSED; only an
+/// explicit Human Owner action moves it to APPROVED (§23's first hard
+/// gate) — nothing before that point touches a workspace or writes a
+/// line of code.
+model Product {
+  id String @id @default(cuid())
+
+  opportunityId String      @unique @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  status String @default("PROPOSED")
+
+  /// Set once ARCHITECTING starts — the real, disposable, gitignored
+  /// factory-workspaces/<product-id>/ directory (§10, §19). Never a
+  /// subtree of VentureForge's own src/.
+  workspacePath String? @map("workspace_path")
+
+  /// Honestly labeled ESTIMATE, never fabricated actual spend (§28-29).
+  estimatedDevelopmentCostUsd Float? @map("estimated_development_cost_usd")
+  estimatedOperatingCostUsd   Float? @map("estimated_operating_cost_usd")
+
+  /// JSON DeploymentPlan/RollbackPlan (§24-27) — produced once HUMAN_REVIEW
+  /// is reached, never executed by any code path in this milestone.
+  deploymentPlan String? @map("deployment_plan")
+  rollbackPlan   String? @map("rollback_plan")
+
+  createdByIdentityId String   @map("created_by_identity_id")
+  createdByIdentity   Identity @relation(fields: [createdByIdentityId], references: [id], onDelete: Restrict)
+
+  /// Secondary actor annotation, plain string — mirrors OutreachExperiment.approvedByIdentityId's own precedent.
+  approvedByIdentityId String?   @map("approved_by_identity_id")
+  approvedAt           DateTime? @map("approved_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  productSpecs       ProductSpec[]
+  mvpArchitectures   MvpArchitecture[]
+  engineeringTasks   EngineeringTask[]
+  productReviewMemos ProductReviewMemo[]
+
+  @@index([status])
+  @@map("products")
+}
+
+/// The Product Strategist's output (§5) — historized, like IcpProfile:
+/// a REQUEST_CHANGES verdict produces a new row, never an edit, so the
+/// full history of what was proposed stays queryable.
+model ProductSpec {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  name           String
+  targetCustomer String @map("target_customer")
+  coreProblem    String @map("core_problem")
+  coreWorkflow   String @map("core_workflow")
+
+  /// JSON-encoded full ProductSpecContent (thesis, coreJobToBeDone,
+  /// proposedSolution, successMetric, mvpBoundary, knownRisks,
+  /// unknowns, openQuestions — every brief §6 field not already its
+  /// own column below).
+  content String
+
+  /// JSON-encoded string[], NOT NULL and enforced non-empty at the
+  /// service layer (§4) — a spec with no stated non-goal is refused.
+  nonGoals String @map("non_goals")
+
+  /// JSON-encoded string[] — enforced non-empty (§5): every important
+  /// assumption must cite a real claim/evidence id belonging to this
+  /// opportunity, never trusted on the model's own say-so.
+  groundedInClaimIds    String @map("grounded_in_claim_ids")
+  groundedInEvidenceIds String @map("grounded_in_evidence_ids")
+
+  generatedByAgentId String @map("generated_by_agent_id")
+  generatedByAgent   Agent  @relation(fields: [generatedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  features         Feature[]
+  mvpArchitectures MvpArchitecture[]
+
+  @@index([productId])
+  @@map("product_specs")
+}
+
+/// One prioritized feature (§6-7) — an explainable table, never a bare
+/// LLM score. Only claimId is a real FK (Restrict — must always be
+/// able to say which claim this feature tests); evidenceIds stays
+/// JSON, mirroring CeoRecommendation.citedClaimIds's own precedent.
+model Feature {
+  id String @id @default(cuid())
+
+  productSpecId String      @map("product_spec_id")
+  productSpec   ProductSpec @relation(fields: [productSpecId], references: [id], onDelete: Cascade)
+
+  description      String
+  problemAddressed String @map("problem_addressed")
+
+  claimId String @map("claim_id")
+  claim   Claim  @relation(fields: [claimId], references: [id], onDelete: Restrict)
+
+  /// JSON-encoded string[] of Evidence ids.
+  evidenceIds String @map("evidence_ids")
+
+  expectedLearning String @map("expected_learning")
+
+  customerValue      Float @map("customer_value")
+  learningValue      Float @map("learning_value")
+  implementationCost Float @map("implementation_cost")
+  technicalRisk      Float @map("technical_risk")
+
+  /// Deterministically computed by domain/product/feature-priority.ts — never asked of a model.
+  score     Float
+  /// One of FEATURE_PRIORITIES.
+  priority  String
+  reasoning String
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([productSpecId])
+  @@index([claimId])
+  @@map("features")
+}
+
+/// The MVP Architect's output (§8-9) — historized, one level below
+/// ProductSpec (which spec version this design answers). MUST_HAVE/
+/// SHOULD_HAVE/DEFERRED tagging and every justification string live
+/// inside designJson (§8: every MUST_HAVE requires a non-empty
+/// justification, enforced at the service layer).
+model MvpArchitecture {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  productSpecId String      @map("product_spec_id")
+  productSpec   ProductSpec @relation(fields: [productSpecId], references: [id], onDelete: Restrict)
+
+  /// JSON-encoded ArchitectureDesign (frontend, backend, database,
+  /// authentication, authorization, externalDependencies, apis,
+  /// coreEntities, dataFlows, errorHandling, testingStrategy,
+  /// securityStrategy, deploymentStrategy, ux — each component tagged
+  /// MUST_HAVE|SHOULD_HAVE|DEFERRED with a justification string).
+  designJson String @map("design_json")
+
+  generatedByAgentId String @map("generated_by_agent_id")
+  generatedByAgent   Agent  @relation(fields: [generatedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  engineeringTasks EngineeringTask[]
+
+  @@index([productId])
+  @@index([productSpecId])
+  @@map("mvp_architectures")
+}
+
+/// One bounded, reviewable unit of engineering work (§11-13) — never
+/// one BUILD_ENTIRE_MVP task. allowedFiles is the real, enforced
+/// permission boundary (domain/workspace/workspace-path.ts), not a
+/// database field alone.
+model EngineeringTask {
+  id String @id @default(cuid())
+
+  mvpArchitectureId String          @map("mvp_architecture_id")
+  mvpArchitecture   MvpArchitecture @relation(fields: [mvpArchitectureId], references: [id], onDelete: Cascade)
+
+  /// Denormalized from mvpArchitecture.productId — mirrors CustomerResponse.prospectId's own precedent (direct "all tasks for this product" queries without a join).
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  title   String
+  purpose String
+
+  /// JSON-encoded string[] of other EngineeringTask ids — informational ordering, not an enforced FK constraint (mirrors citedClaimIds's own JSON-not-join-table precedent).
+  dependsOnTaskIds String @map("depends_on_task_ids")
+
+  /// JSON-encoded string[], relative to the product's own workspace root — the real containment boundary write_workspace_file enforces.
+  allowedFiles String @map("allowed_files")
+
+  /// JSON-encoded string[].
+  acceptanceCriteria String @map("acceptance_criteria")
+  testsRequired      String @map("tests_required")
+
+  /// GREEN — the two tools this task's agent may use (write_workspace_file/run_workspace_command) are both GREEN by design (§1, §29).
+  riskLevel String @default("GREEN") @map("risk_level")
+
+  status       String @default("PENDING")
+  attemptCount Int    @default(0) @map("attempt_count")
+
+  /// Filled in once the Engineering Agent runs — JSON-encoded string[] of relative paths actually written.
+  filesChanged          String? @map("files_changed")
+  implementationSummary String? @map("implementation_summary")
+  /// JSON-encoded string[].
+  knownLimitations      String? @map("known_limitations")
+  /// JSON-encoded DependencyRecord[] (§17) — empty array by default (zero-new-dependency policy).
+  dependencyRecords     String  @default("[]") @map("dependency_records")
+
+  /// The Integration Test stage's own real, mechanical result (§2's pipeline, §15's split from QA's judgment) — null until it runs.
+  integrationTestPassed Boolean? @map("integration_test_passed")
+  integrationTestOutput String?  @map("integration_test_output")
+
+  assignedAgentId String @map("assigned_agent_id")
+  assignedAgent   Agent  @relation(fields: [assignedAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  codeReviews     CodeReview[]
+  qaReports       QaReport[]
+  securityReviews SecurityReview[]
+
+  @@index([mvpArchitectureId])
+  @@index([productId])
+  @@index([status])
+  @@map("engineering_tasks")
+}
+
+/// Independent inspection of one EngineeringTask's changes (§14) —
+/// never performed by the same agent that wrote the code (structural:
+/// a distinct Agent row, no method lets the Engineering Agent mark its
+/// own review passed).
+model CodeReview {
+  id String @id @default(cuid())
+
+  engineeringTaskId String          @map("engineering_task_id")
+  engineeringTask   EngineeringTask @relation(fields: [engineeringTaskId], references: [id], onDelete: Cascade)
+
+  /// JSON-encoded {severity, category, file, detail}[].
+  findings           String  @map("findings")
+  /// Denormalized for cheap querying — true iff any finding is BLOCKER (domain/code-review/code-review.types.ts's hasBlockingFinding).
+  hasBlockingFinding Boolean @map("has_blocking_finding")
+
+  reasoning String
+
+  reviewedByAgentId String @map("reviewed_by_agent_id")
+  reviewedByAgent   Agent  @relation(fields: [reviewedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([engineeringTaskId])
+  @@map("code_reviews")
+}
+
+/// QA's judgment output (§15) — attacks the product from the user's
+/// perspective; identifies MISSING tests, never merely re-runs
+/// existing ones (the Integration Test stage, on EngineeringTask
+/// itself, is the mechanical "do the tests pass" fact).
+model QaReport {
+  id String @id @default(cuid())
+
+  engineeringTaskId String          @map("engineering_task_id")
+  engineeringTask   EngineeringTask @relation(fields: [engineeringTaskId], references: [id], onDelete: Cascade)
+
+  /// One of QA_VERDICTS.
+  verdict String
+
+  /// JSON-encoded string[] — missing test cases, the brief's own explicit requirement.
+  missingTests String @map("missing_tests")
+  /// JSON-encoded string[] — other findings (happy path/empty state/boundary/etc. checked).
+  findings     String
+
+  reasoning String
+
+  reviewedByAgentId String @map("reviewed_by_agent_id")
+  reviewedByAgent   Agent  @relation(fields: [reviewedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([engineeringTaskId])
+  @@map("qa_reports")
+}
+
+/// Security's verdict for one EngineeringTask's generated code (§16) —
+/// combines deterministic static-scan factors with model judgment,
+/// same discipline as evidenceValidatorService. Every finding carries
+/// concrete evidence, never a bare verdict.
+model SecurityReview {
+  id String @id @default(cuid())
+
+  engineeringTaskId String          @map("engineering_task_id")
+  engineeringTask   EngineeringTask @relation(fields: [engineeringTaskId], references: [id], onDelete: Cascade)
+
+  /// One of SECURITY_VERDICTS.
+  verdict String
+
+  /// JSON-encoded SecurityFinding[] ({category, file, detail, evidence}).
+  findings String
+
+  reasoning String
+
+  reviewedByAgentId String @map("reviewed_by_agent_id")
+  reviewedByAgent   Agent  @relation(fields: [reviewedByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([engineeringTaskId])
+  @@map("security_reviews")
+}
+
+/// The Human Owner's actual final M6 artifact (§23, brief §42) —
+/// compiled deterministically from already-persisted data, zero new
+/// model calls, mirroring InvestmentMemo/CustomerDiscoveryMemo's own
+/// discipline exactly. humanDecision/humanReason/decidedAt/
+/// decidedByIdentityId are filled in by exactly one later update.
+model ProductReviewMemo {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  ceoRecommendationId String            @map("ceo_recommendation_id")
+  ceoRecommendation   CeoRecommendation @relation(fields: [ceoRecommendationId], references: [id], onDelete: Restrict)
+
+  chairmanReviewId String         @map("chairman_review_id")
+  chairmanReview   ChairmanReview @relation(fields: [chairmanReviewId], references: [id], onDelete: Restrict)
+
+  /// JSON-encoded full structured memo body (every brief §42-named section).
+  content String
+
+  recommendation String
+  confidence     Float
+
+  /// One of PRODUCT_REVIEW_HUMAN_DECISIONS; null until the Human Owner decides.
+  humanDecision       String?   @map("human_decision")
+  humanReason         String?   @map("human_reason")
+  decidedAt           DateTime? @map("decided_at")
+  decidedByIdentityId String?   @map("decided_by_identity_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([productId])
+  @@map("product_review_memos")
 }

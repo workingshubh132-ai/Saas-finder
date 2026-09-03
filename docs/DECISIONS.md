@@ -874,3 +874,134 @@ shape for a purely cosmetic gain. A memo with `humanDecision: null`
 itself, before the shared function ever sees it — undecided is not the
 same honest fact as decided-and-rejected, and conflating them would
 silently understate the approval rate.
+
+## 50. Two new permissions instead of reclassifying `WRITE_FILES`/`EXECUTE_CODE`
+
+`agentRuntimeService.callTool` throws `AuthorizationDeniedError`
+immediately whenever a tool's permission resolves to
+`REQUIRES_APPROVAL` — no mid-execution approval-suspension mechanism
+exists anywhere in the runtime. That means any tool gated on a
+YELLOW-risk permission (`WRITE_FILES`/`EXECUTE_CODE`, per M1's own
+Constitution) can never complete inside a running execution, full
+stop. Reclassifying either to GREEN to make the Engineering Agent work
+was rejected — that would be an unauthorized loosening of a deliberate
+M1 conservative default, applying to every future agent that might
+ever request those two broad permissions. Building a parallel,
+non-Guardian execution path was also rejected — it would defeat the
+entire point of "every agent runs on the same bounded runtime, Guardian
+enforces every permission." Instead, M6 adds `WRITE_WORKSPACE_FILES`/
+`RUN_WORKSPACE_COMMAND` — new, narrower, genuinely GREEN because their
+blast radius is structurally confined to one disposable, gitignored
+workspace directory — while `WRITE_FILES`/`EXECUTE_CODE` stay exactly
+as M1 defined them and are never granted to any agent (the same
+"declared but never granted" precedent `SEND_EXTERNAL_MESSAGE`
+established in M5).
+
+## 51. No real git branch/worktree manipulation, even though the brief's own language ("factory branch") suggests it
+
+A generated product's workspace is a plain, disposable, gitignored
+on-disk directory (`factory-workspaces/<productId>/`) — never a real
+git branch or worktree of the VentureForge repository. This session
+runs inside a live checkout of VentureForge's own actual working
+branch; any code path that could create, switch, or manipulate real
+git branches risks disrupting that checkout out from under itself,
+which is a strictly worse failure mode than the mechanism it would be
+implementing. The dependency-reuse trick (below) does not require a
+real branch either — a plain directory nested under the repo root is
+sufficient for Node's own module-resolution walk-up to work.
+
+## 52. Dependency reuse via module-resolution walk-up, not a second `npm install`
+
+Placing `factory-workspaces/` as a filesystem descendant of the
+VentureForge repo root means a generated file's `import express from
+"express"` resolves to VentureForge's own already-installed
+`node_modules/express` via Node's standard walk-up algorithm — no
+`npm install` ever needs to run inside a generated workspace, which
+would be a real, network-dependent step this sandboxed environment
+cannot reliably guarantee. The same trick lets `run_workspace_command`
+invoke `vitest`/`tsc` directly from `<repoRoot>/node_modules/.bin/`.
+The one deliberate exception: `@prisma/client` and `dotenv` are
+walk-up-resolvable too, but are explicitly denied by
+`checkDependencies()`'s own `DENIED_PACKAGES` set — "installed" is
+necessary but not sufficient; a generated product must never be able
+to reach VentureForge's own database or read its own `.env`.
+
+## 53. Product persistence defaults to an in-process store, not SQLite via Prisma
+
+The MVP Architect's own dev fixture initially defaulted a generated
+product's database choice to "SQLite via Prisma" as MUST_HAVE. Revised
+before it ever shipped: a second Prisma schema needs its own `prisma
+generate`, a real, potentially network-dependent engine-binary fetch
+this sandboxed environment cannot guarantee — and the brief's own
+"smallest technically credible product" standard does not require real
+persistence to prove a single core workflow. The in-process store (one
+module-level array) is now the MUST_HAVE; SQLite/Prisma is named
+explicitly as the natural next step, demoted to SHOULD_HAVE, never
+silently dropped from the design.
+
+## 54. Code Review / QA / Security Review never change the `EngineeringTask`'s own status
+
+A BLOCKER code-review finding, a FAIL QA verdict, and a FAIL security
+verdict are all facts this build records, never actions it takes
+unilaterally on the underlying task. `EngineeringTask.status` only
+ever reflects whether the Engineering Agent's own implementation
+attempt completed (COMPLETED/FAILED via typecheck) — a separate,
+layered judgment on top of a genuinely-completed implementation, the
+same "deterministic input factors + model judgment as a separate
+layer" split this codebase has used since the Evidence Validator.
+Every judgment verdict flows straight through to the CEO's
+product-build recommendation, the Chairman's own product review, and
+the compiled memo — where a human, not the pipeline itself, decides
+whether a blocking finding means REJECT, REQUEST_CHANGES (back to
+BUILDING), or something else. The only bounded-retry loop that runs
+*without* asking a human is the Engineering Agent's own typecheck
+failure (`engineeringTaskService.recordAttempt`, capped at
+`MAX_TASK_ATTEMPTS`) — because that is a mechanical fact ("this code
+does not even compile"), not a judgment call.
+
+## 55. Cost estimates and deployment/rollback plans are explicit, labeled estimates — never a real spend or a real deploy
+
+`computeCostEstimate()` is a small, deterministic, founder-revisable
+formula (task count × a per-task constant, plus a small operating base
++ per-dependency constant) — the same "founder-revisable number" this
+codebase has used for every execution budget since M1, not a
+reconciliation of actual token spend (which nothing in this system
+currently traces per-Product). `compileDeploymentPlan()`/
+`compileRollbackPlan()` assemble text from the MVP Architect's own real
+`deploymentStrategy`/`healthCheck` fields; neither function calls any
+hosting API, provisions any resource, or touches production
+infrastructure — `Product`'s own state machine has no `DEPLOYED`
+status at all (`product.types.ts`), stopping deliberately at
+`READY_FOR_DEPLOYMENT`.
+
+## 56. Real bugs this build caught before they shipped — recorded, not smoothed over
+
+Continuing the M3/M5 precedent (#37, #45) of naming what verification
+actually found, not just what was intended:
+
+- **A cross-milestone regression**: registering the two new M6 tools
+  into the shared `toolRegistry` singleton silently broke M3's
+  `researchAgentService` and M4's `evidenceValidatorService`, both of
+  which round-robin `toolRegistry.list()` on the assumption every
+  registered tool is an interchangeable research source. Caught by a
+  full-suite run, fixed with a `category` tag on `Tool` rather than a
+  second registry (see `docs/SECURITY.md`'s M6 section for the full
+  account).
+- **A migration gap**: the M6 migration widened three existing tables'
+  CHECK constraints but missed a fourth — `agent_permissions.permission`
+  — so granting either new M6 permission failed at the database layer.
+  Caught by the first real integration test that grants them, fixed
+  with a dedicated follow-up migration.
+- **An execution-state-machine ordering bug**: `engineeringAgentService.run()`
+  originally called `handle.transition("PROCESSING_RESULT")` before
+  its own tool-call loop, but `PROCESSING_RESULT` only transitions to
+  `COMPLETED`/`FAILED` — no execution can call a tool from it. Caught
+  immediately by the first real run of the Engineering Agent against a
+  real workspace; fixed by moving the transition to after every tool
+  call.
+- **A stale domain/tool inconsistency**: `WORKSPACE_COMMAND_NAMES`
+  still listed `"lint"` as a legal command even though
+  `run-workspace-command.tool.ts`'s own `resolveCommand()` never
+  implemented it — a value that would pass one validation layer only
+  to fail at the next with a confusing error. Fixed by removing it
+  from the domain list.

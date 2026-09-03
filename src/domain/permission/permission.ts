@@ -11,6 +11,14 @@ export const PERMISSIONS = [
   "SPEND_MONEY",
   "ACCESS_SECRET",
   "MODIFY_CONFIGURATION",
+  // M6 (docs/M6_ARCHITECTURE_PROPOSAL.md §1, §29) — deliberately narrower
+  // than WRITE_FILES/EXECUTE_CODE above, which stay YELLOW and permanently
+  // ungranted: these two are structurally confined to one disposable,
+  // gitignored factory workspace directory (no secrets, no network, no
+  // production access), which is what actually justifies GREEN rather than
+  // a loosening of the original two broader permissions.
+  "WRITE_WORKSPACE_FILES",
+  "RUN_WORKSPACE_COMMAND",
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

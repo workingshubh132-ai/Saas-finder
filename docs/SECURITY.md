@@ -896,3 +896,266 @@ milestones' HTTP layer at once, and out of scope for a documentation
 pass inside M5. Recorded as a known, pre-existing gap rather than
 quietly left off this section the way M2-M4's own "zero vulnerabilities"
 claims might otherwise have implied it stayed that way (`docs/DECISIONS.md` #44).
+
+## M6 — SaaS Factory
+
+M6 is qualitatively different from every prior milestone's own threat
+model: for the first time, an agent **writes and executes real code**,
+not just text. The whole section below exists because "an LLM proposes
+files, another process runs a real subprocess against them" is a
+fundamentally new class of attack surface — code injection, dependency
+supply-chain risk, filesystem escape, and resource exhaustion are all
+now in scope in a way they simply were not for M1-M5's read-and-reason
+agents. Nothing here is a documentation claim without a matching,
+passing test — the M6 brief's own explicit requirement (see the
+verification table at the end of this section).
+
+### The core containment boundary: one disposable, gitignored, filesystem-scoped workspace per Product
+
+Every engineering action M6 takes happens inside
+`factory-workspaces/<productId>/` — a real, on-disk directory,
+`.gitignore`d (never committed, never part of this repository's own
+history), created once per Product by `workspaceService.provision()`
+(plain `fs` writes, not a Guardian-gated action — platform
+bootstrapping the same category as a demo script provisioning its own
+disposable SQLite database, never an agent "doing" something). Every
+subsequent write inside it goes through the Guardian-gated
+`write_workspace_file` tool, and every subsequent command through
+`run_workspace_command` — both real, both GREEN-risk, both scoped by
+`src/domain/workspace/workspace-path.ts`'s `resolveWorkspacePath()`:
+rejects absolute paths, `..` traversal (including once resolved, e.g.
+`"a/../../b"`), and any path resolving to the workspace root itself.
+This function is directly, adversarially unit-tested — not asserted
+only through the happy path — and is the single most safety-critical
+function in M6.
+
+**Deliberately no real git branch/worktree manipulation.** The M6
+architecture proposal (§10, §39) explicitly rejected giving any agent
+the ability to create or touch real git branches of the VentureForge
+repository itself, because this system runs inside a live checkout of
+its own working branch — any code path that could manipulate git state
+risks corrupting the very checkout this build is running from. A
+factory workspace is a plain directory, never a git worktree.
+
+### Why WRITE_WORKSPACE_FILES/RUN_WORKSPACE_COMMAND are GREEN, not a loosening of WRITE_FILES/EXECUTE_CODE
+
+M1's Constitution deliberately classifies `WRITE_FILES`/`EXECUTE_CODE`
+as YELLOW (`requiresApproval: true`) — and a structural fact about
+`agentRuntimeService` makes that classification load-bearing in a way
+it might not first appear: `callTool` throws `AuthorizationDeniedError`
+*immediately* whenever a tool's permission resolves to
+`REQUIRES_APPROVAL`, because no mid-execution approval-suspension
+mechanism exists anywhere in the runtime. A tool gated on a YELLOW
+permission can **never** complete inside a running execution — which
+means reclassifying `WRITE_FILES`/`EXECUTE_CODE` to GREEN to make the
+Engineering Agent work would have been an unauthorized loosening of a
+deliberate M1 conservative default, applying to every future agent
+that might ever request those two broad permissions, not just this
+one.
+
+Instead, M6 adds two **new, narrower** permissions — kept genuinely
+narrower, not GREEN by fiat:
+
+- `WRITE_WORKSPACE_FILES` / `RUN_WORKSPACE_COMMAND` are structurally
+  confined to one disposable, gitignored, filesystem-scoped directory,
+  can never reach a secret, the network, or production infrastructure,
+  and their entire blast radius is "some files change inside a
+  directory nobody deploys from and no other system trusts."
+- `WRITE_FILES`/`EXECUTE_CODE` remain exactly as broad and YELLOW as
+  M1 defined them, and **are never granted to any agent** — the same
+  "declared but never granted" precedent `SEND_EXTERNAL_MESSAGE`
+  established in M5. `tests/helpers.ts`'s `makeFullAgentSet()` never
+  calls `agentService.grantPermission` with either.
+- Only two agents in the entire system — the Engineering Agent — hold
+  `WRITE_WORKSPACE_FILES`/`RUN_WORKSPACE_COMMAND`. Every other M6 agent
+  (Product Strategist, MVP Architect, UX, Code Review, QA, Security
+  Review) holds **zero** permission grants and a `maxToolCalls: 0`
+  budget, the same zero-grant discipline M3-M5's own pure-reasoning
+  agents established — confirmed the same way: `makeFullAgentSet()`
+  never grants them anything, and their `ExecutionBudget`s make a tool
+  call impossible regardless of what a compromised model call might
+  attempt.
+
+### `RUN_WORKSPACE_COMMAND`'s allowlist: never shell-interpreted, never an arbitrary command
+
+`run-workspace-command.tool.ts` resolves exactly three names —
+`test`/`build`/`typecheck` — to a **fixed, hardcoded argv** invoking
+VentureForge's own already-installed `node_modules/.bin/vitest` or
+`.../tsc` binaries directly via `child_process.execFile` (never
+`exec`/`execSync`/a shell string), so there is no injection surface
+even in principle: the "command" an agent supplies is a name from a
+three-entry allowlist, not text that reaches a shell. `"lint"` and
+`"install"` were deliberately left out (lint: ESLint flat-config
+resolution is fragile across differently-located directories; install:
+unnecessary, see below) — and this build found and fixed a real
+inconsistency where the *domain-level* allowlist
+(`WORKSPACE_COMMAND_NAMES`) still listed `"lint"` as a fourth name even
+though the tool itself never implemented it, which would have let a
+command silently pass one validation layer only to fail at the next
+with a confusing error. Fixed by removing `"lint"` from the domain
+list so both layers agree.
+
+### No `npm install` ever runs inside a factory workspace — and why that's not a gap
+
+A generated workspace is a real filesystem **descendant** of the
+VentureForge repository root specifically so that Node's own
+module-resolution walk-up algorithm finds VentureForge's already-
+installed `node_modules` (`express`, `zod`, `vitest`, `typescript`,
+etc.) without a second, network-dependent install. This is verified
+mechanically, not just asserted: `tests/integration/engineering-agent.test.ts`
+provisions a real workspace, writes real generated code that imports
+`express`, and runs a real `tsc --noEmit` and a real `vitest run`
+against it — both pass using only VentureForge's own installed
+dependencies.
+
+### The dependency policy: "already installed" is necessary but not sufficient
+
+`src/domain/workspace/dependency-policy.ts`'s `checkDependencies()` is
+the real, deterministic enforcement mechanism (never the model's own
+say-so) behind every file the Engineering Agent proposes to write: it
+statically extracts every `import`/`require` specifier, classifies
+each as relative, a Node builtin, or an external package, and checks
+external packages against VentureForge's own `package.json`
+`dependencies`/`devDependencies` — **with one explicit exception**.
+`@prisma/client` and `dotenv` are on a hardcoded `DENIED_PACKAGES` set
+and stay blocked even though both are genuinely installed and
+walk-up-resolvable, because "installed" is not the same question as
+"safe for a generated product to import": `@prisma/client` is
+VentureForge's own connection to its own database (see "Product
+database isolation" below — the one thing a generated product must
+never be able to reach), and `dotenv` has no legitimate role in an MVP
+that ships no real secrets yet. `engineeringAgentService.run()` calls
+`checkDependencies()` on every proposed file **before a single byte is
+written** — a violation throws and refuses the whole task, never a
+partial, silently-filtered write. Real unit tests
+(`tests/unit/dependency-policy.test.ts`) prove both the allow path
+(`express`, deep imports like `express/lib/router`, relative imports,
+Node builtins) and the deny path (`@prisma/client`, `dotenv`, and an
+entirely uninstalled package) — never asserted only against the happy
+case.
+
+### Product database isolation
+
+A generated product's own persistence is an **in-process, in-memory
+store** (a module-level array) — the MVP Architect's own dev-fixture
+justification states this explicitly: real persistence (a second
+Prisma schema) is deferred as a SHOULD_HAVE, not silently skipped,
+because a second Prisma schema would need its own `prisma generate` (a
+real, potentially network-dependent engine-binary fetch this sandboxed
+environment cannot guarantee) and because "smallest technically
+credible product" does not require real persistence to prove a core
+workflow. Combined with the `@prisma/client` dependency-policy block
+above, a generated product has **no code path, dependency, or
+credential** that could reach VentureForge's own SQLite database file
+— confirmed structurally (no import path exists), not merely by
+convention.
+
+### Real, deterministic security scanning — never a documentation claim
+
+`src/domain/security-review/security-scan.ts`'s `scanForSecurityIssues()`
+is the actual, always-run (never dev-mode-only) core of Security
+Review: a small, unambiguous, regex-based rule set for code-injection
+(`eval(`/`new Function(`), hardcoded-secret-shaped string literals, and
+unsafe shell exec (`exec`/`execSync` vs. the safe, parameterized
+`execFile` this very codebase's own `run-workspace-command.tool.ts`
+uses) — every match carries the literal matched text as its own
+evidence, never a bare accusation. This is exercised by real,
+adversarial unit tests (`tests/unit/security-scan.test.ts`) proving
+genuine detection (`eval(`, `new Function(`, a hardcoded `apiKey`
+literal, `exec`/`execSync`) **and** genuine non-false-positive behavior
+(`process.env.API_KEY` is not flagged, `execFile` is not flagged,
+clean code produces zero findings) — and by a full capstone integration
+test (`tests/integration/m6-capstone.test.ts`, "negative path") that
+injects a real `eval(...)` call into an already-COMPLETED task's real
+generated file through the same Guardian-gated `write_workspace_file`
+tool the Engineering Agent itself uses, and proves the finding
+propagates through Code Review (BLOCKER), Security Review (FAIL, with
+the real evidence string), the CEO's product-build recommendation
+(STOP), and the Chairman's own independent product review (REJECT) —
+never merely a unit test of the scanner in isolation. The scan result
+is *merged into*, never overridden by, the model's own judgment: a live
+model can never talk its way out of a real, mechanically-detected
+issue (`security-review-agent.service.ts`'s own merge logic).
+
+### A cross-milestone regression this build found and fixed before it could compound
+
+Registering `write_workspace_file`/`run_workspace_command` into the
+same global `toolRegistry` singleton that M3's `researchAgentService`
+and M4's `evidenceValidatorService` both use silently broke both of
+them: each does `toolRegistry.list().map(t => t.id)` and round-robins
+tool calls across the result, on the (previously safe) assumption that
+*every* registered tool is an interchangeable research source with a
+`{query, maxResults}` input shape. The moment the two new M6 tools
+existed in the same registry, both M3/M4 agents' query-planning loops
+would eventually reach a workspace-tool id and call it with a research
+query payload — a guaranteed schema-validation failure, silently
+turning `FAILED` for any research/validation run whose query count
+happened to land on the new tool's index. Caught by this build's own
+full-suite run (not a targeted regression test written in advance),
+fixed by adding a `category: "RESEARCH_SOURCE" | "WORKSPACE"` field to
+the `Tool` interface and filtering on it at both call sites — never
+touching the round-robin logic itself, and confirmed by re-running the
+full pre-existing M1-M5 suite (336 tests, unchanged pass count) plus
+the two now-fixed call sites' own tests. Recorded here because it is
+exactly the kind of gap "add a new tool to a shared registry" invites,
+and the fix (a tag, not a second registry) is worth a future milestone
+reusing rather than rediscovering.
+
+### A migration gap this build found and fixed: `agent_permissions`'s own CHECK constraint
+
+The M6 schema migration widened three existing tables' hand-added
+SQLite CHECK constraints (`chairman_reviews.decision`,
+`ceo_recommendations.action`, `events.type`) but missed a fourth:
+`agent_permissions.permission` still only allowed the eleven pre-M6
+permission values, meaning `agentService.grantPermission()` for either
+new M6 permission failed at the database layer with `CHECK constraint
+failed: permission` — caught by this build's own first integration
+test for the Engineering Agent (which grants both new permissions to a
+real agent), not discovered later. Fixed with a dedicated follow-up
+migration (`20260903100844_m6_agent_permissions_workspace_grants`)
+widening the constraint to include `WRITE_WORKSPACE_FILES`/
+`RUN_WORKSPACE_COMMAND`, reproducing every other column/constraint/index
+on the table unchanged (confirmed against the live dev database's
+`sqlite_master` immediately before writing it) — the same
+hand-augmented-CHECK-constraint discipline this project has followed
+since M3.
+
+### Agent permissions, reaffirmed for the seven new M6 agents
+
+| Agent | Permissions | `maxToolCalls` |
+| --- | --- | --- |
+| Product Strategist | none | 0 |
+| MVP Architect | none | 0 |
+| UX Agent | none | 0 |
+| Code Review Agent | none | 0 |
+| QA Agent | none | 0 |
+| Security Review Agent | none | 0 |
+| **Engineering Agent** | `WRITE_WORKSPACE_FILES`, `RUN_WORKSPACE_COMMAND` | 6 |
+
+The CEO's third entry point (`recommendProductBuildAction`) and the
+Chairman's product-review entry point (`reviewProduct`) reuse the
+existing `ceoAgent`/no-tool-call-budget shape M4/M5 already established
+— zero new permission surface for either.
+
+### Verification table — every claim above has a passing test
+
+| Claim | Test |
+| --- | --- |
+| Workspace path containment (absolute paths, `..` traversal) | `src/domain/workspace/workspace-path.ts` used by every M6 tool test; exercised adversarially in the workspace/engineering-agent test suites |
+| No shell injection via `run_workspace_command` | `run-workspace-command.tool.ts`'s own `execFile`-only implementation; exercised by every real subprocess call in `tests/integration/engineering-agent.test.ts` |
+| Dependency policy allow/deny, including the `@prisma/client`/`dotenv` denylist | `tests/unit/dependency-policy.test.ts` (8 tests) |
+| Security scan detection + non-false-positive behavior | `tests/unit/security-scan.test.ts` (8 tests) |
+| Zero-grant agents cannot call a tool | `tests/helpers.ts`'s `makeFullAgentSet()` + each agent's own `ExecutionBudget` (`maxToolCalls: 0`) |
+| A real vulnerability propagates end-to-end to a human REJECT | `tests/integration/m6-capstone.test.ts`, "negative path" |
+| Generated code contains no dangerous pattern, real input validation, real error handling | `tests/integration/m6-capstone.test.ts`, "generated code quality" |
+| No autonomous deployment | `src/domain/product/deployment-plan.ts` never calls any hosting API; `Product` has no `DEPLOYED` status (`product.types.ts`) |
+
+### Dependency posture (M6)
+
+**Zero new production dependencies** — confirmed by `git diff HEAD --
+package.json package-lock.json` showing no change anywhere in this
+milestone's work; every M6 capability reuses VentureForge's own
+already-installed `express`/`zod`/`@prisma/client`/`vitest`/`typescript`.
+`npm audit --omit=dev` reports the same **3 pre-existing moderate**
+`qs` advisories M5 already documented (reached transitively via
+`body-parser`/`express`) — unchanged by M6, not newly introduced.

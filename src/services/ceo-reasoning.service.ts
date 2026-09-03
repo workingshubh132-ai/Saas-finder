@@ -1,18 +1,25 @@
-import type { Claim, CeoRecommendation, ValidationReport } from "@prisma/client";
+import type { Claim, CeoRecommendation, EngineeringTask, ProductSpec, ValidationReport } from "@prisma/client";
 import { z } from "zod";
 import { ceoRecommendationRepository } from "../db/repositories/ceo-recommendation.repository.js";
 import { claimRepository } from "../db/repositories/claim.repository.js";
+import { codeReviewRepository } from "../db/repositories/code-review.repository.js";
 import { customerResponseRepository } from "../db/repositories/customer-response.repository.js";
+import { engineeringTaskRepository } from "../db/repositories/engineering-task.repository.js";
 import { outreachExperimentRepository } from "../db/repositories/outreach-experiment.repository.js";
 import { opportunityRepository } from "../db/repositories/opportunity.repository.js";
+import { productRepository } from "../db/repositories/product.repository.js";
+import { productSpecRepository } from "../db/repositories/product-spec.repository.js";
 import { prospectRepository } from "../db/repositories/prospect.repository.js";
+import { qaReportRepository } from "../db/repositories/qa-report.repository.js";
+import { securityReviewRepository } from "../db/repositories/security-review.repository.js";
 import { validationReportRepository } from "../db/repositories/validation-report.repository.js";
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
 import { CEO_DECISION_ACTIONS } from "../domain/decision/decision-action.types.js";
 import { CUSTOMER_DISCOVERY_ACTIONS } from "../domain/decision/customer-discovery-action.types.js";
+import { PRODUCT_BUILD_ACTIONS } from "../domain/decision/product-build-action.types.js";
 import { computeDecisionPriority, PLACEHOLDER_NEUTRAL_SCORE } from "../domain/decision/priority.js";
-import { ValidationError } from "../domain/shared/errors.js";
-import { toJsonString } from "../domain/shared/json.js";
+import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
+import { fromJsonString, toJsonString } from "../domain/shared/json.js";
 import { agentRuntimeService, type ExecutionBudget, type RunOutcome } from "./agent-runtime.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
@@ -101,6 +108,99 @@ const CEO_CUSTOMER_DISCOVERY_SYSTEM_PROMPT =
   'Respond with ONLY JSON matching: {"action": "RUN_CUSTOMER_DISCOVERY"|"REFINE_ICP"|"TEST_CLAIM"|"STOP_EXPERIMENT"|' +
   '"REQUEST_HUMAN_REVIEW", "reasoning": string, "citedClaimIds": string[], "targetClaimId": string|null, ' +
   '"confidence": number}';
+
+const productBuildDecisionSchema = z.object({
+  action: z.enum(PRODUCT_BUILD_ACTIONS),
+  reasoning: z.string().min(1),
+  citedClaimIds: z.array(z.string().min(1)).min(1),
+  confidence: z.number().min(0).max(1),
+});
+type ProductBuildDecision = z.infer<typeof productBuildDecisionSchema>;
+
+interface EngineeringTaskOutcomeSummary {
+  taskCount: number;
+  completedCount: number;
+  blockingCodeReviewCount: number;
+  qaFailCount: number;
+  securityFailCount: number;
+}
+
+const CEO_PRODUCT_BUILD_SYSTEM_PROMPT =
+  "You are the CEO of VentureForge, now deciding a product-build step (docs/M6_ARCHITECTURE_PROPOSAL.md §32). This " +
+  "is a THIRD, distinct question from your usual opportunity-kill or customer-discovery decisions: given a product " +
+  "specification, its technical architecture, and the real outcome of the engineering pipeline (tasks completed, " +
+  "code review, QA, and security verdicts), decide what should happen to this product build next. You have no " +
+  "tools and cannot search, build, or contact anyone yourself — every input is already-established fact, not " +
+  "something to re-derive. Choose exactly one action: BUILD (the technical pipeline is genuinely clean — every " +
+  "task completed, no blocking review findings, security passed — recommend a real human go/no-go decision now); " +
+  "CONTINUE_BUILD (progress is real but incomplete — more of the already-approved MVP boundary is worth building " +
+  "next); CUT_SCOPE (the attempt reveals the MVP is trying to do too much — recommend narrowing the boundary " +
+  "further before continuing); REQUEST_CUSTOMER_RESEARCH (the thesis this product is grounded in is too thin — " +
+  "recommend more customer evidence before investing further engineering effort); STOP (a fundamental problem — a " +
+  "security failure, a thesis that does not hold up — makes continuing this build attempt unwise); or " +
+  "REQUEST_HUMAN_REVIEW (you cannot confidently resolve this yourself — an honest, valid outcome). Every " +
+  "recommendation MUST cite the specific claim ids the ProductSpec itself is grounded in. " +
+  'Respond with ONLY JSON matching: {"action": "BUILD"|"CONTINUE_BUILD"|"CUT_SCOPE"|"REQUEST_CUSTOMER_RESEARCH"|' +
+  '"STOP"|"REQUEST_HUMAN_REVIEW", "reasoning": string, "citedClaimIds": string[], "confidence": number}';
+
+function buildProductBuildPrompt(spec: ProductSpec, groundedInClaimIds: readonly string[], outcome: EngineeringTaskOutcomeSummary): string {
+  return [
+    `Product spec: ${spec.name}`,
+    `Target customer: ${spec.targetCustomer}`,
+    `Core problem: ${spec.coreProblem}`,
+    `Core workflow: ${spec.coreWorkflow}`,
+    `Grounded in ${groundedInClaimIds.length} real claim(s): ${groundedInClaimIds.join(", ") || "(none)"}`,
+    "",
+    `Engineering pipeline outcome: ${outcome.completedCount}/${outcome.taskCount} task(s) completed.`,
+    `Code review: ${outcome.blockingCodeReviewCount} task(s) with a BLOCKER finding.`,
+    `QA: ${outcome.qaFailCount} task(s) with a FAIL verdict.`,
+    `Security: ${outcome.securityFailCount} task(s) with a FAIL verdict.`,
+  ].join("\n");
+}
+
+/**
+ * DEVELOPMENT ONLY — deterministic, rule-based, derived from the real
+ * ProductSpec's own grounded claims and the real engineering pipeline
+ * outcome, same discipline as buildDevCeoFixture/buildDevCustomerDiscoveryFixture.
+ */
+function buildDevProductBuildFixture(groundedInClaimIds: readonly string[], outcome: EngineeringTaskOutcomeSummary): ProductBuildDecision {
+  if (groundedInClaimIds.length === 0) {
+    throw new ValidationError("Cannot produce a product-build recommendation for a ProductSpec grounded in no claims.");
+  }
+  const citedClaimIds = [...groundedInClaimIds];
+
+  if (outcome.securityFailCount > 0) {
+    return {
+      action: "STOP",
+      reasoning: `[DEV FIXTURE] ${outcome.securityFailCount} engineering task(s) failed Security Review — continuing this build attempt without resolving a real security failure is not recommended.`,
+      citedClaimIds,
+      confidence: 0.8,
+    };
+  }
+  if (outcome.completedCount < outcome.taskCount) {
+    return {
+      action: "CUT_SCOPE",
+      reasoning: `[DEV FIXTURE] Only ${outcome.completedCount}/${outcome.taskCount} engineering task(s) completed within their bounded retry budget — the current MVP boundary may still be too large to build reliably.`,
+      citedClaimIds,
+      confidence: 0.6,
+    };
+  }
+  if (outcome.blockingCodeReviewCount > 0 || outcome.qaFailCount > 0) {
+    return {
+      action: "REQUEST_HUMAN_REVIEW",
+      reasoning: `[DEV FIXTURE] All tasks completed, but ${outcome.blockingCodeReviewCount} carry a blocking code-review finding and ${outcome.qaFailCount} failed QA — a human should weigh these before a go/no-go decision.`,
+      citedClaimIds,
+      confidence: 0.5,
+    };
+  }
+
+  return {
+    action: "BUILD",
+    reasoning: `[DEV FIXTURE] All ${outcome.taskCount} engineering task(s) completed cleanly — no blocking code-review findings, no QA or security failures. Ready for a real human go/no-go decision.`,
+    citedClaimIds,
+    confidence: 0.75,
+  };
+}
 
 function buildCustomerDiscoveryPrompt(
   opportunity: { title: string; opportunityScore: number | null; confidenceScore: number | null },
@@ -531,6 +631,117 @@ export const ceoReasoningService = {
         await eventBus.publish({
           type: "CEO_RECOMMENDATION_ISSUED",
           payload: { recommendationId: recommendation.id, opportunityId: params.opportunityId, action: decision.action, confidence: decision.confidence },
+        });
+
+        return { recommendation };
+      },
+      CEO_REASONING_BUDGET,
+    );
+  },
+
+  /**
+   * The third, distinct entry point (docs/M6_ARCHITECTURE_PROPOSAL.md
+   * §32) — "what should happen to this product build next," asked
+   * after the engineering pipeline has run. Same agent row, same
+   * zero-tool-call/zero-permission boundary, same bounded budget,
+   * same shared ceo_recommendations table (keyed by the Product's own
+   * opportunityId — the table doesn't care which action set produced
+   * a row, mirroring recommendCustomerDiscoveryAction exactly).
+   * Recommends only — never itself advances the Product's own status;
+   * the factory orchestrator (product-factory.service.ts) and the
+   * Human Owner decide what to do with the recommendation.
+   */
+  async recommendProductBuildAction(params: { agentId: string; productId: string; startedBy: AuthenticatedActor }): Promise<RunOutcome<CeoReasoningResult>> {
+    const product = await productRepository.findById(params.productId);
+    if (!product) throw new NotFoundError("Product", params.productId);
+    const spec = await productSpecRepository.findLatestForProduct(params.productId);
+    if (!spec) throw new ValidationError(`Product ${params.productId} has no ProductSpec yet — the Product Strategist must run first.`);
+    const groundedInClaimIds = fromJsonString<string[]>(spec.groundedInClaimIds, []);
+
+    const tasks = await engineeringTaskRepository.listForProduct(params.productId);
+    let blockingCodeReviewCount = 0;
+    let qaFailCount = 0;
+    let securityFailCount = 0;
+    for (const task of tasks) {
+      const [codeReview, qaReport, securityReview] = await Promise.all([
+        codeReviewRepository.findLatestForTask(task.id),
+        qaReportRepository.findLatestForTask(task.id),
+        securityReviewRepository.findLatestForTask(task.id),
+      ]);
+      if (codeReview?.hasBlockingFinding) blockingCodeReviewCount += 1;
+      if (qaReport?.verdict === "FAIL") qaFailCount += 1;
+      if (securityReview?.verdict === "FAIL") securityFailCount += 1;
+    }
+    const outcome: EngineeringTaskOutcomeSummary = {
+      taskCount: tasks.length,
+      completedCount: tasks.filter((t: EngineeringTask) => t.status === "COMPLETED").length,
+      blockingCodeReviewCount,
+      qaFailCount,
+      securityFailCount,
+    };
+
+    const execution = await agentRuntimeService.startExecution({
+      agentId: params.agentId,
+      taskId: null,
+      input: { productId: params.productId, mode: "PRODUCT_BUILD" },
+      startedBy: params.startedBy,
+    });
+
+    return agentRuntimeService.run(
+      execution.id,
+      async (handle) => {
+        handle.step();
+        const { value: decision } = await completeWithValidation(handle.callModel, productBuildDecisionSchema, {
+          systemPrompt: CEO_PRODUCT_BUILD_SYSTEM_PROMPT,
+          maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
+          messages: [{ role: "user", content: buildProductBuildPrompt(spec, groundedInClaimIds, outcome) }],
+          devFixtureResponse: buildDevProductBuildFixture(groundedInClaimIds, outcome),
+        });
+
+        await handle.transition("PROCESSING_RESULT");
+        handle.step();
+
+        // Never trust the model's own citation on faith — every cited claim id must be real and actually ground this spec.
+        const validClaimIds = new Set(groundedInClaimIds);
+        const citedClaimIds = decision.citedClaimIds.filter((id) => validClaimIds.has(id));
+        if (citedClaimIds.length === 0) {
+          throw new ValidationError("Product-build recommendation cited no real, verifiable claim id — refusing to persist an ungrounded recommendation.");
+        }
+
+        const priorityScore = computeDecisionPriority({
+          opportunityScore: PLACEHOLDER_NEUTRAL_SCORE,
+          confidenceScore: decision.confidence,
+          killRiskScore: securityFailCount > 0 ? 1 : 0,
+          topEvidenceGapImpactScore: PLACEHOLDER_NEUTRAL_SCORE,
+          maxClaimEIG: PLACEHOLDER_NEUTRAL_SCORE,
+          estimatedResearchCost: PLACEHOLDER_NEUTRAL_SCORE,
+          timeSensitivityScore: PLACEHOLDER_NEUTRAL_SCORE,
+          strategicFitScore: PLACEHOLDER_NEUTRAL_SCORE,
+        });
+
+        const recommendation = await ceoRecommendationRepository.create({
+          opportunityId: product.opportunityId,
+          decisionCycleId: null,
+          action: decision.action,
+          reasoning: decision.reasoning,
+          citedClaimIds: toJsonString(citedClaimIds),
+          citedValidationReportIds: toJsonString([]),
+          confidence: decision.confidence,
+          priorityScore,
+        });
+
+        await auditService.record({
+          actorType: "AGENT",
+          actorId: params.agentId,
+          action: `CEO_PRODUCT_BUILD_RECOMMENDATION_${decision.action}`,
+          resourceType: "PRODUCT",
+          resourceId: params.productId,
+          result: "SUCCESS",
+          metadata: { recommendationId: recommendation.id, confidence: decision.confidence, ...outcome },
+        });
+        await eventBus.publish({
+          type: "CEO_RECOMMENDATION_ISSUED",
+          payload: { recommendationId: recommendation.id, opportunityId: product.opportunityId, productId: params.productId, action: decision.action, confidence: decision.confidence },
         });
 
         return { recommendation };

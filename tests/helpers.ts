@@ -1,11 +1,19 @@
-import type { Agent, Opportunity, Problem, Prospect, SignalCluster } from "@prisma/client";
+import type { Agent, EngineeringTask, MvpArchitecture, Opportunity, Problem, Product, ProductSpec, Prospect, SignalCluster } from "@prisma/client";
 import { agentService, type CreateAgentParams } from "../src/services/agent.service.js";
 import { signalClusterRepository } from "../src/db/repositories/signal-cluster.repository.js";
+import { claimExtractionService } from "../src/services/claim-extraction.service.js";
+import { engineeringAgentService } from "../src/services/engineering-agent.service.js";
+import { engineeringTaskService } from "../src/services/engineering-task.service.js";
+import { mvpArchitectService } from "../src/services/mvp-architect.service.js";
 import { opportunityService } from "../src/services/opportunity.service.js";
 import type { OpportunityScoreDimensions } from "../src/services/opportunity-scorer.js";
 import type { KillRiskDimensions } from "../src/services/kill-risk-scorer.js";
 import { problemService } from "../src/services/problem.service.js";
+import { productService } from "../src/services/product.service.js";
+import { productStrategistService } from "../src/services/product-strategist.service.js";
 import { prospectService, type CreateProspectParams } from "../src/services/prospect.service.js";
+import { uxAgentService } from "../src/services/ux-agent.service.js";
+import { workspaceService } from "../src/services/workspace.service.js";
 import { humanOwner } from "./setup.js";
 
 export { humanOwner as HUMAN_OWNER } from "./setup.js";
@@ -132,6 +140,15 @@ export interface FullAgentSet {
   prospectQualificationAgent: Agent;
   messageDrafterAgent: Agent;
   responseAnalystAgent: Agent;
+  /** M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §23. Zero grants: pure synthesis over already-persisted rows. */
+  productStrategistAgent: Agent;
+  mvpArchitectAgent: Agent;
+  uxAgent: Agent;
+  /** M6 — the only two agents in the whole system granted WRITE_WORKSPACE_FILES/RUN_WORKSPACE_COMMAND (both GREEN, confined to one disposable workspace directory). */
+  engineeringAgent: Agent;
+  codeReviewAgent: Agent;
+  qaAgent: Agent;
+  securityReviewAgent: Agent;
 }
 
 /** Every agent role M3+M4's pipelines need, correctly permissioned (docs/M4_ARCHITECTURE_PROPOSAL.md §23). */
@@ -150,7 +167,35 @@ export async function makeFullAgentSet(): Promise<FullAgentSet> {
   const prospectQualificationAgent = await makeAgent({ role: "Prospect Qualification" });
   const messageDrafterAgent = await makeAgent({ role: "Message Drafter" });
   const responseAnalystAgent = await makeAgent({ role: "Response Analyst" });
-  return { researchAgent, problemAgent, competitorAgent, marketAgent, opportunityAgent, validatorAgent, ceoAgent, icpAnalystAgent, prospectQualificationAgent, messageDrafterAgent, responseAnalystAgent };
+  const productStrategistAgent = await makeAgent({ role: "Product Strategist" });
+  const mvpArchitectAgent = await makeAgent({ role: "MVP Architect" });
+  const uxAgent = await makeAgent({ role: "UX Agent" });
+  const engineeringAgent = await makeAgent({ role: "Engineering Agent" });
+  await agentService.grantPermission({ agentId: engineeringAgent.id, permission: "WRITE_WORKSPACE_FILES", grantedBy: humanOwner });
+  await agentService.grantPermission({ agentId: engineeringAgent.id, permission: "RUN_WORKSPACE_COMMAND", grantedBy: humanOwner });
+  const codeReviewAgent = await makeAgent({ role: "Code Review Agent" });
+  const qaAgent = await makeAgent({ role: "QA Agent" });
+  const securityReviewAgent = await makeAgent({ role: "Security Review Agent" });
+  return {
+    researchAgent,
+    problemAgent,
+    competitorAgent,
+    marketAgent,
+    opportunityAgent,
+    validatorAgent,
+    ceoAgent,
+    icpAnalystAgent,
+    prospectQualificationAgent,
+    messageDrafterAgent,
+    responseAnalystAgent,
+    productStrategistAgent,
+    mvpArchitectAgent,
+    uxAgent,
+    engineeringAgent,
+    codeReviewAgent,
+    qaAgent,
+    securityReviewAgent,
+  };
 }
 
 /** A DISCOVERED Prospect with plausible defaults — override organization/role/icpProfileId to test specific qualification outcomes (docs/M5_ARCHITECTURE_PROPOSAL.md §4-5). */
@@ -168,4 +213,99 @@ export async function makeProspect(overrides: Partial<Omit<CreateProspectParams,
     actorId: null,
     ...overrides,
   });
+}
+
+export interface ProductChain {
+  agents: FullAgentSet;
+  opportunity: Opportunity;
+  product: Product;
+  productSpec: ProductSpec;
+  mvpArchitecture: MvpArchitecture;
+}
+
+export interface AgentSetWithOpportunity {
+  agents: FullAgentSet;
+  opportunity: Opportunity;
+}
+
+/**
+ * A real Opportunity with real extracted claims and a full M6 agent
+ * set — no Product created yet. For a test that itself exercises
+ * Product creation/approval (e.g. over HTTP), as distinct from
+ * makeApprovedProduct()'s own further-advanced starting point.
+ */
+export async function makeAgentSetWithOpportunity(): Promise<AgentSetWithOpportunity> {
+  const agents = await makeFullAgentSet();
+  const opportunity = await makeOpportunity();
+  await claimExtractionService.extractForOpportunity({ opportunityId: opportunity.id, actorType: "SYSTEM", actorId: null });
+  return { agents, opportunity };
+}
+
+export interface ApprovedProductChain extends AgentSetWithOpportunity {
+  product: Product;
+}
+
+/**
+ * makeAgentSetWithOpportunity(), plus a human-APPROVED Product — the
+ * starting point productFactoryService.build() itself needs (it runs
+ * the Strategist -> Architect -> UX -> Engineering -> ... chain
+ * internally), as distinct from makeMvpArchitecture()'s own
+ * further-advanced starting point for tests of individual downstream
+ * agents.
+ */
+export async function makeApprovedProduct(): Promise<ApprovedProductChain> {
+  const { agents, opportunity } = await makeAgentSetWithOpportunity();
+
+  const product = await productService.create({ opportunityId: opportunity.id, createdByIdentityId: humanOwner.actorId });
+  await productService.approve({ id: product.id, actor: humanOwner });
+
+  return { agents, opportunity, product };
+}
+
+/**
+ * The full M6 pipeline up through a UX-complete MvpArchitecture — a
+ * real Opportunity with real extracted claims, a human-APPROVED
+ * Product, and the Product Strategist -> MVP Architect -> UX Agent
+ * chain run for real (dev-fixture model responses, real persistence,
+ * real audit trail). The shared starting point every M6 downstream
+ * test (engineering tasks, code review, QA, security review) needs,
+ * mirroring makeContactedMessage's own role in the M5 test suite.
+ */
+export async function makeMvpArchitecture(): Promise<ProductChain> {
+  const { agents, opportunity, product } = await makeApprovedProduct();
+
+  const strategistOutcome = await productStrategistService.run({ agentId: agents.productStrategistAgent.id, productId: product.id, startedBy: authActor() });
+  if (strategistOutcome.status !== "COMPLETED") throw new Error("productStrategistService.run did not complete");
+
+  const architectOutcome = await mvpArchitectService.run({ agentId: agents.mvpArchitectAgent.id, productSpecId: strategistOutcome.result.productSpec.id, startedBy: authActor() });
+  if (architectOutcome.status !== "COMPLETED") throw new Error("mvpArchitectService.run did not complete");
+
+  const uxOutcome = await uxAgentService.run({ agentId: agents.uxAgent.id, mvpArchitectureId: architectOutcome.result.mvpArchitecture.id, startedBy: authActor() });
+  if (uxOutcome.status !== "COMPLETED") throw new Error("uxAgentService.run did not complete");
+
+  return { agents, opportunity, product, productSpec: strategistOutcome.result.productSpec, mvpArchitecture: uxOutcome.result.mvpArchitecture };
+}
+
+export interface CompletedEngineeringTaskChain extends ProductChain {
+  workspacePath: string;
+  storeTask: EngineeringTask;
+  apiTask: EngineeringTask;
+}
+
+/**
+ * makeMvpArchitecture(), provisioned and decomposed into its two real
+ * engineering tasks, with the store task actually implemented by the
+ * real Engineering Agent (real workspace files, real typecheck) — the
+ * shared "there is real, COMPLETED code to judge" starting point
+ * Code Review, QA, and Security Review tests all need.
+ */
+export async function makeCompletedEngineeringTask(): Promise<CompletedEngineeringTaskChain> {
+  const chain = await makeMvpArchitecture();
+  const workspacePath = await workspaceService.provision(chain.product.id);
+  const [storeTask, apiTask] = await engineeringTaskService.decomposeFromArchitecture(chain.mvpArchitecture.id, chain.agents.engineeringAgent.id);
+
+  const outcome = await engineeringAgentService.run({ agentId: chain.agents.engineeringAgent.id, engineeringTaskId: storeTask!.id, startedBy: authActor() });
+  if (outcome.status !== "COMPLETED" || !outcome.result.typecheckPassed) throw new Error("engineeringAgentService.run did not complete the store task");
+
+  return { ...chain, workspacePath, storeTask: outcome.result.task, apiTask: apiTask! };
 }

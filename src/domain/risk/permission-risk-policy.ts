@@ -20,6 +20,14 @@ export const PERMISSION_RISK_LEVEL: Readonly<Record<Permission, RiskLevel>> = {
   READ_WEB: "GREEN",
   READ_DATABASE: "GREEN",
   WRITE_DATABASE: "GREEN",
+  // M6 (docs/M6_ARCHITECTURE_PROPOSAL.md §1) — GREEN because their blast
+  // radius is structurally confined to one disposable factory workspace
+  // directory, never VentureForge's own filesystem/secrets/network/
+  // production. WRITE_FILES/EXECUTE_CODE below stay YELLOW unchanged —
+  // this is a narrower, separately-justified capability, not a loosening
+  // of those two.
+  WRITE_WORKSPACE_FILES: "GREEN",
+  RUN_WORKSPACE_COMMAND: "GREEN",
 
   // YELLOW — external-facing or meaningfully resource-consuming, matches
   // §8 YELLOW examples (external outreach, external account creation,
