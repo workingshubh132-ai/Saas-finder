@@ -1,10 +1,14 @@
 import type { Agent, DeploymentPlan, EngineeringTask, GoToMarketPlan, LaunchPlan, LaunchReviewMemo, MvpArchitecture, Opportunity, PricingModel, Problem, Product, ProductSpec, Prospect, SignalCluster } from "@prisma/client";
 import { agentService, type CreateAgentParams } from "../src/services/agent.service.js";
 import { signalClusterRepository } from "../src/db/repositories/signal-cluster.repository.js";
+import { activationDefinitionRepository } from "../src/db/repositories/activation-definition.repository.js";
 import { claimExtractionService } from "../src/services/claim-extraction.service.js";
+import { deploymentPlanService } from "../src/services/deployment-plan.service.js";
+import { deploymentService } from "../src/services/deployment.service.js";
 import { engineeringAgentService } from "../src/services/engineering-agent.service.js";
 import { engineeringTaskService } from "../src/services/engineering-task.service.js";
 import { launchOperationsService } from "../src/services/launch-operations.service.js";
+import { launchReviewMemoService } from "../src/services/launch-review-memo.service.js";
 import { mvpArchitectService } from "../src/services/mvp-architect.service.js";
 import { opportunityService } from "../src/services/opportunity.service.js";
 import type { OpportunityScoreDimensions } from "../src/services/opportunity-scorer.js";
@@ -17,6 +21,11 @@ import { productStrategistService } from "../src/services/product-strategist.ser
 import { prospectService, type CreateProspectParams } from "../src/services/prospect.service.js";
 import { uxAgentService } from "../src/services/ux-agent.service.js";
 import { workspaceService } from "../src/services/workspace.service.js";
+import { approvalService } from "../src/services/approval.service.js";
+import { createAnalyticsProvider } from "../src/providers/analytics-provider-factory.js";
+import { createRevenueProvider } from "../src/providers/revenue-provider-factory.js";
+import { createCustomerDataProvider } from "../src/providers/customer-data-provider-factory.js";
+import type { DevCustomerDataProvider } from "../src/providers/dev-customer-data-provider.js";
 import { humanOwner } from "./setup.js";
 
 export { humanOwner as HUMAN_OWNER } from "./setup.js";
@@ -157,6 +166,13 @@ export interface FullAgentSet {
   pricingAgent: Agent;
   gtmAgent: Agent;
   supportAgent: Agent;
+  /** M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §24. Zero grants — every M8 agent only reads provider data and reasons over it. */
+  productIntelligenceAgent: Agent;
+  revenueAnalystAgent: Agent;
+  growthAnalystAgent: Agent;
+  customerIntelligenceAgent: Agent;
+  experimentAnalystAgent: Agent;
+  portfolioAnalystAgent: Agent;
 }
 
 /** Every agent role M3+M4's pipelines need, correctly permissioned (docs/M4_ARCHITECTURE_PROPOSAL.md §23). */
@@ -188,6 +204,12 @@ export async function makeFullAgentSet(): Promise<FullAgentSet> {
   const pricingAgent = await makeAgent({ role: "Pricing Agent" });
   const gtmAgent = await makeAgent({ role: "GTM Agent" });
   const supportAgent = await makeAgent({ role: "Support Agent" });
+  const productIntelligenceAgent = await makeAgent({ role: "Product Intelligence Agent" });
+  const revenueAnalystAgent = await makeAgent({ role: "Revenue Analyst" });
+  const growthAnalystAgent = await makeAgent({ role: "Growth Analyst" });
+  const customerIntelligenceAgent = await makeAgent({ role: "Customer Intelligence Agent" });
+  const experimentAnalystAgent = await makeAgent({ role: "Experiment Analyst" });
+  const portfolioAnalystAgent = await makeAgent({ role: "Portfolio Analyst" });
   return {
     researchAgent,
     problemAgent,
@@ -211,6 +233,12 @@ export async function makeFullAgentSet(): Promise<FullAgentSet> {
     pricingAgent,
     gtmAgent,
     supportAgent,
+    productIntelligenceAgent,
+    revenueAnalystAgent,
+    growthAnalystAgent,
+    customerIntelligenceAgent,
+    experimentAnalystAgent,
+    portfolioAnalystAgent,
   };
 }
 
@@ -405,4 +433,155 @@ export async function makeAwaitingLaunchApprovalProduct(): Promise<AwaitingLaunc
     goToMarketPlan: summary.goToMarketPlan,
     memo: summary.memo,
   };
+}
+
+export interface LiveProductChain extends AwaitingLaunchApprovalChain {
+  deploymentId: string;
+}
+
+/**
+ * makeAwaitingLaunchApprovalProduct(), plus a real human APPROVE, a
+ * real exact-action-bound DeploymentPlan approval, and a real EXECUTE
+ * against the DEV_FIXTURE DeploymentProvider — the shared starting
+ * point every M8 test needs (docs/M8_ARCHITECTURE_PROPOSAL.md §1: M8
+ * picks up from exactly a LIVE product). Mirrors
+ * tests/integration/m7-capstone-positive.test.ts's own sequence
+ * exactly.
+ */
+export async function makeLiveProduct(): Promise<LiveProductChain> {
+  const chain = await makeAwaitingLaunchApprovalProduct();
+  await launchReviewMemoService.recordHumanDecision({ memoId: chain.memo.id, humanDecision: "APPROVE", humanReason: null, actor: humanOwner });
+
+  const approvalRequest = await deploymentPlanService.requestApproval({ deploymentPlanId: chain.deploymentPlan.id, requestedByAgentId: chain.agents.launchStrategistAgent.id });
+  await approvalService.decide({ id: approvalRequest.id, toStatus: "APPROVED", reviewedBy: humanOwner });
+  await deploymentPlanService.applyDecision({ approvalRequestId: approvalRequest.id, actor: humanOwner });
+
+  const deployment = await deploymentService.execute({ deploymentPlanId: chain.deploymentPlan.id, actor: humanOwner });
+  const liveProduct = await productService.getOrThrow(chain.product.id);
+  if (liveProduct.status !== "LIVE") {
+    throw new Error(`Product did not reach LIVE after EXECUTE (status: ${liveProduct.status})`);
+  }
+
+  return { ...chain, product: liveProduct, deploymentId: deployment.id };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export async function seedActivationDefinition(productId: string, eventName = "core_action"): Promise<void> {
+  await activationDefinitionRepository.create({ productId, eventName, definedBy: "test-fixture" });
+}
+
+export interface SeedUsageCohortOptions {
+  productId: string;
+  cohortSize: number;
+  /** How many days before `now` this cohort signed up — must be >= 30 for D30 retention to be measurable. */
+  daysAgoSignedUp: number;
+  activatedFraction: number;
+  /** Of the activated users, the fraction also active >= 30 days after their own signup. */
+  retainedFraction: number;
+  activationEventName?: string;
+  now?: Date;
+}
+
+export interface SeedUsageCohortResult {
+  signupCount: number;
+  activatedCount: number;
+  retainedCount: number;
+}
+
+/**
+ * Seeds one cohort of real, timestamped signup/activation/activity
+ * events through the actual DevAnalyticsProvider singleton — never a
+ * hand-constructed BusinessMetric row (docs/M8_ARCHITECTURE_PROPOSAL.md
+ * §4-5). Callers compose two calls (an older cohort for retention, a
+ * recent one for growth trend) to get realistic, controllable signal.
+ */
+export async function seedUsageCohort(options: SeedUsageCohortOptions): Promise<SeedUsageCohortResult> {
+  const analytics = createAnalyticsProvider();
+  const now = options.now ?? new Date();
+  const activationEventName = options.activationEventName ?? "core_action";
+  const activatedCount = Math.round(options.cohortSize * options.activatedFraction);
+  const retainedCount = Math.round(activatedCount * options.retainedFraction);
+  const signedUpAt = new Date(now.getTime() - options.daysAgoSignedUp * DAY_MS);
+
+  for (let i = 0; i < options.cohortSize; i += 1) {
+    counter += 1;
+    const userRef = `test-user-${counter}`;
+    await analytics.track({ name: "signup", productId: options.productId, properties: {}, userRef, occurredAt: signedUpAt });
+    if (i < activatedCount) {
+      await analytics.track({ name: activationEventName, productId: options.productId, properties: {}, userRef, occurredAt: new Date(signedUpAt.getTime() + 1 * DAY_MS) });
+    }
+    if (i < retainedCount) {
+      await analytics.track({ name: activationEventName, productId: options.productId, properties: {}, userRef, occurredAt: new Date(signedUpAt.getTime() + 31 * DAY_MS) });
+    }
+  }
+
+  return { signupCount: options.cohortSize, activatedCount, retainedCount };
+}
+
+export interface SeedSubscriptionInput {
+  monthlyValueUsd: number;
+  /** Defaults to 60 days ago — comfortably before any 30-day churn window. */
+  startedDaysAgo?: number;
+  /** When set, the subscription is cancelled this many days ago (after being recorded) — real churn signal, not a static "already cancelled" row. */
+  cancelledDaysAgo?: number;
+}
+
+/** Seeds real subscriptions (optionally later cancelled, for real churn signal) through the actual DevRevenueProvider singleton (docs/M8_ARCHITECTURE_PROPOSAL.md §16, §31). */
+export async function seedRevenueData(productId: string, subscriptions: readonly SeedSubscriptionInput[], now?: Date): Promise<void> {
+  const revenue = createRevenueProvider();
+  const resolvedNow = now ?? new Date();
+  for (const sub of subscriptions) {
+    counter += 1;
+    const id = `test-sub-${counter}`;
+    await revenue.recordSubscription({
+      id,
+      productId,
+      monthlyValueUsd: sub.monthlyValueUsd,
+      startedAt: new Date(resolvedNow.getTime() - (sub.startedDaysAgo ?? 60) * DAY_MS),
+    });
+    if (sub.cancelledDaysAgo !== undefined) {
+      await revenue.cancelSubscription({ id, cancelledAt: new Date(resolvedNow.getTime() - sub.cancelledDaysAgo * DAY_MS) });
+    }
+  }
+}
+
+export interface SeedFeedbackInput {
+  excerpt: string;
+  sentiment: "POSITIVE" | "NEUTRAL" | "NEGATIVE" | null;
+  /** Defaults to a fresh, distinct respondent per item — pass the same ref twice to simulate one respondent giving multiple pieces of feedback (never counted twice toward independence). */
+  respondentRef?: string;
+}
+
+/**
+ * Seeds real feedback through the actual DevCustomerDataProvider
+ * singleton (docs/M8_ARCHITECTURE_PROPOSAL.md §12, §31) — cast to the
+ * concrete dev class the same way every other M8 seed helper reaches
+ * past its port interface to a DEV_FIXTURE-only seeding method
+ * (addFeedback/addCancellationReason are deliberately NOT part of the
+ * CustomerDataProvider port itself — a production provider would never
+ * expose a way to inject fixture rows).
+ */
+export async function seedCustomerFeedback(productId: string, items: readonly SeedFeedbackInput[], now?: Date): Promise<void> {
+  const customerData = createCustomerDataProvider() as DevCustomerDataProvider;
+  const collectedAt = now ?? new Date();
+  for (const item of items) {
+    counter += 1;
+    customerData.addFeedback({ productId, respondentRef: item.respondentRef ?? `test-respondent-${counter}`, excerpt: item.excerpt, sentiment: item.sentiment, collectedAt });
+  }
+}
+
+export interface SeedCancellationInput {
+  reason: string;
+  respondentRef?: string;
+}
+
+/** Seeds real cancellation reasons through the same DevCustomerDataProvider singleton seedCustomerFeedback uses. */
+export async function seedCancellationReasons(productId: string, items: readonly SeedCancellationInput[], now?: Date): Promise<void> {
+  const customerData = createCustomerDataProvider() as DevCustomerDataProvider;
+  const cancelledAt = now ?? new Date();
+  for (const item of items) {
+    counter += 1;
+    customerData.addCancellationReason({ productId, respondentRef: item.respondentRef ?? `test-respondent-${counter}`, reason: item.reason, cancelledAt });
+  }
 }

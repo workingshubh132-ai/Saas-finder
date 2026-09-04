@@ -1,4 +1,5 @@
 import { decisionRecordRepository } from "../db/repositories/decision-record.repository.js";
+import { businessReviewMemoRepository } from "../db/repositories/business-review-memo.repository.js";
 import { customerDiscoveryMemoRepository } from "../db/repositories/customer-discovery-memo.repository.js";
 import { launchReviewMemoRepository } from "../db/repositories/launch-review-memo.repository.js";
 import { productReviewMemoRepository } from "../db/repositories/product-review-memo.repository.js";
@@ -67,6 +68,25 @@ export const calibrationService = {
    */
   async summarizeLaunch(): Promise<CalibrationSummary> {
     const memos = await launchReviewMemoRepository.list();
+    const decided = memos.filter((m): m is typeof m & { humanDecision: string } => m.humanDecision !== null);
+    return summarizeCalibration(
+      decided.map((m) => ({ confidenceAtDecision: m.confidence, humanDecision: m.humanDecision })),
+      "APPROVE",
+    );
+  },
+
+  /**
+   * Same mechanism a sixth time, M8's own data
+   * (docs/M8_ARCHITECTURE_PROPOSAL.md §38): BusinessReviewMemo.confidence
+   * (min of the CEO's business-action recommendation confidence and the
+   * Chairman's own business review confidence at compile time) against
+   * the memo's own humanDecision. This is the *decision-confidence*
+   * axis only — a structurally different mechanism, predictionOutcomeService's
+   * own predicted-vs-observed-metric-value tracking, covers Constitution
+   * §23's "prediction tracking" separately.
+   */
+  async summarizeBusinessDecisions(): Promise<CalibrationSummary> {
+    const memos = await businessReviewMemoRepository.list();
     const decided = memos.filter((m): m is typeof m & { humanDecision: string } => m.humanDecision !== null);
     return summarizeCalibration(
       decided.map((m) => ({ confidenceAtDecision: m.confidence, humanDecision: m.humanDecision })),

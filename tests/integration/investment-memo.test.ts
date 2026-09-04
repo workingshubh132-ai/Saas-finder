@@ -37,7 +37,7 @@ describe("investmentMemoService.compile", () => {
     expect(memo.nextAction.length).toBeGreaterThan(0);
     expect(content.humanDecision).toBe("PENDING");
     expect(content.ceoRecommendation.action).toBe(ceoOutcome.result.recommendation.action);
-    expect(content.validatorFindings.length).toBe(12);
+    expect(content.validatorFindings.length).toBe(13);
   });
 
   it("rejects a CEO recommendation / Chairman review pair that doesn't belong to the given opportunity", async () => {

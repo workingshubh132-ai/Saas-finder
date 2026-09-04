@@ -178,6 +178,9 @@ model ApprovalRequest {
   deploymentPlans DeploymentPlan[]
   billingPlans    BillingPlan[]
 
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §25-26. One ApprovalRequest ever binds to one exact GrowthExperiment (resourceType="GROWTH_EXPERIMENT").
+  growthExperiments GrowthExperiment[]
+
   @@index([status])
   @@index([resourceType, resourceId])
   @@map("approval_requests")
@@ -574,6 +577,8 @@ model ChairmanReview {
   productReviewMemos     ProductReviewMemo[]
   /// M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §29, §31.
   launchReviewMemos      LaunchReviewMemo[]
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §23, §25.
+  businessReviewMemos    BusinessReviewMemo[]
 
   @@index([opportunityId])
   @@map("chairman_reviews")
@@ -908,6 +913,9 @@ model Claim {
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34. Which claim a proposed feature tests (§6).
   features Feature[]
 
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §26. Which claim a growth experiment tests.
+  growthExperiments GrowthExperiment[]
+
   @@index([opportunityId])
   @@index([status])
   @@map("claims")
@@ -1017,6 +1025,8 @@ model CeoRecommendation {
   productReviewMemos     ProductReviewMemo[]
   /// M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §28, §31.
   launchReviewMemos      LaunchReviewMemo[]
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §22, §25.
+  businessReviewMemos    BusinessReviewMemo[]
 
   @@index([opportunityId])
   @@map("ceo_recommendations")
@@ -1527,6 +1537,16 @@ model Product {
   incidents         Incident[]
   supportCases      SupportCase[]
   launchReviewMemos LaunchReviewMemo[]
+
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §32.
+  activationDefinitions ActivationDefinition[]
+  cohorts               Cohort[]
+  anomalies             Anomaly[]
+  growthExperiments     GrowthExperiment[]
+  businessHealths       BusinessHealth[]
+  portfolioSnapshots    PortfolioSnapshot[]
+  predictionOutcomes    PredictionOutcome[]
+  businessReviewMemos   BusinessReviewMemo[]
 
   @@index([status])
   @@map("products")
@@ -2082,16 +2102,33 @@ model BusinessMetric {
 
   metricType String @map("metric_type")
 
-  /// OBSERVED | ESTIMATED — never optional, never inferred after the fact.
+  /// OBSERVED | ESTIMATED | INFERRED | PREDICTED (widened for M8,
+  /// docs/M8_ARCHITECTURE_PROPOSAL.md §9, §11) — never optional, never
+  /// inferred after the fact.
   valueKind String @map("value_kind")
   value     Float
-  /// Where this value actually came from: DEV_FIXTURE | MANUAL_ENTRY | COMPUTED_ESTIMATE.
+  /// Where this value actually came from — see BUSINESS_METRIC_SOURCES.
   source    String
+
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §9, §12. Null for point-in-time
+  /// metrics (UPTIME_PCT); required for windowed ones (30-day retention, MRR-for-month).
+  periodStart DateTime? @map("period_start")
+  periodEnd   DateTime? @map("period_end")
+
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §6, §13. Null unless this metric is cohort-scoped.
+  cohortId String? @map("cohort_id")
+  cohort   Cohort? @relation(fields: [cohortId], references: [id], onDelete: SetNull)
+
+  /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §10. JSON-encoded string[] —
+  /// which other BusinessMetric rows an INFERRED value was derived
+  /// from (provenance chain). Null for OBSERVED/ESTIMATED/PREDICTED.
+  inputMetricIds String? @map("input_metric_ids")
 
   recordedAt DateTime @default(now()) @map("recorded_at")
 
   @@index([productId])
   @@index([productId, metricType])
+  @@index([cohortId])
   @@map("business_metrics")
 }
 
@@ -2179,4 +2216,311 @@ model LaunchReviewMemo {
 
   @@index([productId])
   @@map("launch_review_memos")
+}
+
+// ---------------------------------------------------------------------------
+// M8 — Revenue & Growth Intelligence Engine
+// (docs/M8_ARCHITECTURE_PROPOSAL.md)
+// ---------------------------------------------------------------------------
+
+/// Set once per product — activation is product-defined, never
+/// framework-assumed (§4).
+model ActivationDefinition {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  eventName String @map("event_name")
+  definedBy String @map("defined_by")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([productId])
+  @@map("activation_definitions")
+}
+
+/// A dimension/value label (§6) — a Cohort is not itself a metric;
+/// its actual numbers are BusinessMetric rows with a cohortId FK.
+/// Unique per (productId, dimension, dimensionValue) so a re-run of
+/// cohort discovery is an idempotent upsert, never a duplicate row.
+model Cohort {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// One of COHORT_DIMENSIONS.
+  dimension      String
+  dimensionValue String @map("dimension_value")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  businessMetrics BusinessMetric[]
+
+  @@unique([productId, dimension, dimensionValue])
+  @@index([productId])
+  @@map("cohorts")
+}
+
+/// Deterministic detector output (§19) — no model call anywhere in
+/// this table's write path.
+model Anomaly {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  metricType String @map("metric_type")
+
+  /// SPIKE | DROP
+  direction String
+
+  observedValue  Float @map("observed_value")
+  baselineMean   Float @map("baseline_mean")
+  baselineStdDev Float @map("baseline_std_dev")
+  zScore         Float @map("z_score")
+
+  reason String
+
+  detectedAt DateTime @default(now()) @map("detected_at")
+
+  @@index([productId])
+  @@index([productId, metricType])
+  @@map("anomalies")
+}
+
+/// Growth experiment lifecycle (§26) — named distinctly from M5's
+/// OutreachExperiment (outbound messaging vs. product/growth changes
+/// against already-live traffic — different kinds of thing). No
+/// createdByAgentId FK, matching DeploymentPlan/BillingPlan's own M7
+/// precedent (docs/DECISIONS.md #62): the authoring agent is an
+/// explicit parameter to requestApproval, never a stored column.
+model GrowthExperiment {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// The Claim this experiment tests — Restrict: an experiment must always be able to say which claim it tested.
+  claimId String @map("claim_id")
+  claim   Claim  @relation(fields: [claimId], references: [id], onDelete: Restrict)
+
+  hypothesis              String
+  interventionDescription String @map("intervention_description")
+  controlDescription      String @map("control_description")
+  targetMetricType        String @map("target_metric_type")
+  successCriteria         String @map("success_criteria")
+  failureCriteria         String @map("failure_criteria")
+  estimatedCostUsd        Float  @map("estimated_cost_usd")
+  /// LOW | MEDIUM | HIGH — free classification for human review, not a Guardian RiskLevel.
+  riskLevel                String @map("risk_level")
+  durationDays             Int    @map("duration_days")
+
+  /// DRAFT -> ANALYZED -> AWAITING_APPROVAL -> APPROVED -> RUNNING -> COMPLETED -> ANALYZED (§26).
+  status String @default("DRAFT")
+
+  approvalRequestId String?          @map("approval_request_id")
+  approvalRequest   ApprovalRequest? @relation(fields: [approvalRequestId], references: [id], onDelete: SetNull)
+
+  startedAt DateTime? @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  results GrowthExperimentResult[]
+
+  @@index([productId])
+  @@index([status])
+  @@map("growth_experiments")
+}
+
+/// Observed outcome of a completed GrowthExperiment (§26) — honest
+/// about sample size, never a fabricated p-value.
+model GrowthExperimentResult {
+  id String @id @default(cuid())
+
+  growthExperimentId String           @map("growth_experiment_id")
+  growthExperiment   GrowthExperiment @relation(fields: [growthExperimentId], references: [id], onDelete: Cascade)
+
+  baselineValue     Float @map("baseline_value")
+  experimentValue   Float @map("experiment_value")
+  sampleSize        Int   @map("sample_size")
+  observedChangePct Float @map("observed_change_pct")
+
+  /// One of GROWTH_EXPERIMENT_RESULT_CONFIDENCE — LOW_CONFIDENCE below MIN_EXPERIMENT_SAMPLE, never a fabricated p-value.
+  confidence String
+
+  limitations String
+  decision    String
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([growthExperimentId])
+  @@map("growth_experiment_results")
+}
+
+/// A multi-dimensional snapshot, never one magical number (§18-19).
+/// `state` is derived deterministically (deriveBusinessHealth) —
+/// never an LLM's own free assignment.
+model BusinessHealth {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  productHealth     Float @map("product_health")
+  customerHealth    Float @map("customer_health")
+  revenueHealth     Float @map("revenue_health")
+  growthHealth      Float @map("growth_health")
+  marginHealth      Float @map("margin_health")
+  operationalHealth Float @map("operational_health")
+  risk              Float
+  evidenceConfidence Float @map("evidence_confidence")
+
+  compositeScore Float @map("composite_score")
+  /// One of BUSINESS_HEALTH_STATES.
+  state String
+  /// JSON-encoded string[] — the explicit, named threshold(s) that produced this state.
+  reasons String
+
+  computedAt DateTime @default(now()) @map("computed_at")
+
+  @@index([productId])
+  @@map("business_healths")
+}
+
+/// One comparison row per LIVE/PAUSED product per Portfolio Analyst
+/// run (§28). `recommendation`/`reasoning`/`citedMetricIds` are
+/// columns here rather than a separate table, mirroring M7's own
+/// "LaunchPlan has no independent status column" precedent
+/// (docs/DECISIONS.md #61) — no separate row where a few columns on
+/// an already-necessary row suffice.
+model PortfolioSnapshot {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// Groups every product's row from the same portfolio run together.
+  runId String @map("run_id")
+
+  revenueUsd         Float @map("revenue_usd")
+  growthRatePct       Float @map("growth_rate_pct")
+  retentionPct        Float @map("retention_pct")
+  marginPct           Float @map("margin_pct")
+  evidenceConfidence  Float @map("evidence_confidence")
+  killRiskScore       Float @map("kill_risk_score")
+  priorityScore       Float @map("priority_score")
+
+  /// One of PORTFOLIO_RECOMMENDATIONS — Constitution §19's own literal vocabulary.
+  recommendation String
+  reasoning      String
+  /// JSON-encoded string[].
+  citedMetricIds String @map("cited_metric_ids")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([productId])
+  @@index([runId])
+  @@map("portfolio_snapshots")
+}
+
+/// Prediction tracking (Constitution §23) — recorded before outcomes
+/// are known; resolved only once the target period has actually
+/// elapsed (assertResolutionNotPremature — no future-information
+/// leakage, §38).
+model PredictionOutcome {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// One of BUSINESS_METRIC_TYPES.
+  metricType String @map("metric_type")
+
+  predictedValue Float    @map("predicted_value")
+  predictedAt    DateTime @map("predicted_at")
+
+  targetPeriodStart DateTime @map("target_period_start")
+  targetPeriodEnd   DateTime @map("target_period_end")
+
+  /// Which agent/formula made the prediction.
+  predictionSource String @map("prediction_source")
+
+  /// Null until the target period has elapsed and the prediction is resolved.
+  observedValue Float?    @map("observed_value")
+  errorPct      Float?    @map("error_pct")
+  resolvedAt    DateTime? @map("resolved_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  learningRecords LearningRecord[]
+
+  @@index([productId])
+  @@index([productId, metricType])
+  @@map("prediction_outcomes")
+}
+
+/// Constitution §22's pipeline, stored: PREDICTION -> ACTUAL RESULT ->
+/// ERROR -> ROOT CAUSE -> LESSON -> POLICY/MODEL/PROCESS UPDATE.
+/// `suggestedProcessChange` is free text a human reads — no code path
+/// in this codebase ever reads a LearningRecord and edits a system
+/// prompt, permission, risk level, or formula constant (§38, §41 —
+/// that requires the existing governance process and explicit human
+/// action; this milestone builds no such path at all).
+model LearningRecord {
+  id String @id @default(cuid())
+
+  predictionOutcomeId String?            @map("prediction_outcome_id")
+  predictionOutcome   PredictionOutcome? @relation(fields: [predictionOutcomeId], references: [id], onDelete: SetNull)
+
+  businessReviewMemoId String?             @map("business_review_memo_id")
+  businessReviewMemo   BusinessReviewMemo? @relation(fields: [businessReviewMemoId], references: [id], onDelete: SetNull)
+
+  errorDescription String @map("error_description")
+
+  rootCause              String? @map("root_cause")
+  lesson                 String?
+  suggestedProcessChange String? @map("suggested_process_change")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("learning_records")
+}
+
+/// The Human Owner's actual final artifact for a BUSINESS_ACTIONS
+/// recommendation (§23, §25) — compiled deterministically, zero new
+/// model calls, mirroring LaunchReviewMemo/ProductReviewMemo exactly.
+model BusinessReviewMemo {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  ceoRecommendationId String            @map("ceo_recommendation_id")
+  ceoRecommendation   CeoRecommendation @relation(fields: [ceoRecommendationId], references: [id], onDelete: Restrict)
+
+  chairmanReviewId String         @map("chairman_review_id")
+  chairmanReview   ChairmanReview @relation(fields: [chairmanReviewId], references: [id], onDelete: Restrict)
+
+  /// JSON-encoded full structured memo body.
+  content String
+
+  recommendation String
+  confidence     Float
+
+  /// One of BUSINESS_REVIEW_HUMAN_DECISIONS; null until the Human Owner decides.
+  humanDecision       String?   @map("human_decision")
+  humanReason         String?   @map("human_reason")
+  decidedAt           DateTime? @map("decided_at")
+  decidedByIdentityId String?   @map("decided_by_identity_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  learningRecords LearningRecord[]
+
+  @@index([productId])
+  @@map("business_review_memos")
 }

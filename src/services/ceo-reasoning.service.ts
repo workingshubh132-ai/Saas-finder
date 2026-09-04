@@ -1,5 +1,7 @@
 import type { Claim, CeoRecommendation, EngineeringTask, ProductSpec, ValidationReport } from "@prisma/client";
 import { z } from "zod";
+import { businessHealthRepository } from "../db/repositories/business-health.repository.js";
+import { businessMetricRepository } from "../db/repositories/business-metric.repository.js";
 import { ceoRecommendationRepository } from "../db/repositories/ceo-recommendation.repository.js";
 import { claimRepository } from "../db/repositories/claim.repository.js";
 import { codeReviewRepository } from "../db/repositories/code-review.repository.js";
@@ -22,14 +24,19 @@ import { CEO_DECISION_ACTIONS } from "../domain/decision/decision-action.types.j
 import { CUSTOMER_DISCOVERY_ACTIONS } from "../domain/decision/customer-discovery-action.types.js";
 import { LAUNCH_OPERATIONS_ACTIONS } from "../domain/decision/launch-operations-action.types.js";
 import { PRODUCT_BUILD_ACTIONS } from "../domain/decision/product-build-action.types.js";
+import { BUSINESS_ACTIONS, BUSINESS_RELEVANT_CLAIM_TYPES } from "../domain/decision/business-action.types.js";
 import { computeDecisionPriority, PLACEHOLDER_NEUTRAL_SCORE } from "../domain/decision/priority.js";
+import { checkLaunchBudget } from "../domain/product/launch-budget.js";
+import { checkRevenueConcentration } from "../domain/revenue-intelligence/concentration.js";
 import type { UnitEconomics } from "../domain/pricing-model/unit-economics.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString, toJsonString } from "../domain/shared/json.js";
+import { createRevenueProvider } from "../providers/revenue-provider-factory.js";
 import { agentRuntimeService, type ExecutionBudget, type RunOutcome } from "./agent-runtime.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
 import { evidenceGapService } from "./evidence-gap.service.js";
+import { killIntelligenceService } from "./kill-intelligence.service.js";
 import { completeWithValidation } from "./model-output.js";
 
 const MODEL_MAX_OUTPUT_TOKENS = 1024;
@@ -514,6 +521,149 @@ function buildDevCeoFixture(
   };
 }
 
+const businessActionDecisionSchema = z.object({
+  action: z.enum(BUSINESS_ACTIONS),
+  reasoning: z.string().min(1),
+  citedClaimIds: z.array(z.string().min(1)).min(1),
+  confidence: z.number().min(0).max(1),
+});
+type BusinessActionDecision = z.infer<typeof businessActionDecisionSchema>;
+
+interface BusinessActionSummary {
+  businessHealthState: string;
+  compositeScore: number;
+  killRecommendation: string;
+  combinedKillRiskScore: number;
+  budgetExceeded: boolean;
+  grossMarginPct: number | null;
+  revenueConcentrationRisk: boolean;
+  groundedClaimCount: number;
+}
+
+const MARGIN_SUSTAINABLE_FLOOR_FOR_CEO = 0.2;
+
+const CEO_BUSINESS_SYSTEM_PROMPT =
+  "You are the CEO of VentureForge, now deciding a business-intelligence step (docs/M8_ARCHITECTURE_PROPOSAL.md " +
+  "§22). This is a FIFTH, distinct question from your opportunity-kill, customer-discovery, product-build, or " +
+  "launch-operations decisions: given everything now observed about how a LIVE product's business is actually " +
+  "doing (its BusinessHealth state, kill-risk assessment, budget, margin, and revenue-concentration signal), decide " +
+  "what should happen next. You have no tools and cannot invest, change pricing, or kill anything yourself — every " +
+  "input is already-established fact. Choose exactly one action: INVEST (the business is genuinely healthy and " +
+  "evidence-grounded); IMPROVE_PRODUCT (the product itself needs work before more investment makes sense); " +
+  "RUN_EXPERIMENT (a specific uncertainty is worth testing before deciding further); CHANGE_PRICING (margin is too " +
+  "thin to sustain); CHANGE_CHANNEL (growth depends on a channel worth reconsidering); INVESTIGATE_CHURN (retention " +
+  "or kill-risk signals warrant investigation before any other action); REDUCE_COST (estimated cost exceeds the " +
+  "founder's budget ceiling); PAUSE_GROWTH (further growth investment is not warranted right now); " +
+  "PREPARE_KILL_REVIEW (kill intelligence recommends it — this still requires Chairman review and a human decision, " +
+  "never an automatic kill); KILL (only when the evidence is truly unambiguous — still requires the same review); " +
+  "or REQUEST_HUMAN_REVIEW (you cannot confidently resolve this yourself — an honest, valid outcome, and the right " +
+  "choice whenever revenue concentration risk is flagged or grounding is thin). Every recommendation MUST cite the " +
+  "specific claim ids that ground it. " +
+  'Respond with ONLY JSON matching: {"action": "INVEST"|"IMPROVE_PRODUCT"|"RUN_EXPERIMENT"|"CHANGE_PRICING"|' +
+  '"CHANGE_CHANNEL"|"INVESTIGATE_CHURN"|"REDUCE_COST"|"PAUSE_GROWTH"|"PREPARE_KILL_REVIEW"|"KILL"|' +
+  '"REQUEST_HUMAN_REVIEW", "reasoning": string, "citedClaimIds": string[], "confidence": number}';
+
+function buildBusinessActionPrompt(summary: BusinessActionSummary, groundedClaims: readonly Claim[]): string {
+  const claimLines = groundedClaims.map((c) => `- [id=${c.id}] [${c.claimType}] status=${c.status} confidence=${c.confidence.toFixed(2)}: ${c.statement}`);
+  return [
+    `BusinessHealth state: ${summary.businessHealthState} (composite score ${summary.compositeScore.toFixed(2)})`,
+    `Kill intelligence: ${summary.killRecommendation} (combined kill risk ${summary.combinedKillRiskScore.toFixed(2)})`,
+    `Budget exceeded: ${summary.budgetExceeded}`,
+    `Gross margin: ${summary.grossMarginPct === null ? "not yet computed" : `${(summary.grossMarginPct * 100).toFixed(1)}%`}`,
+    `Revenue concentration risk: ${summary.revenueConcentrationRisk}`,
+    `Grounded in ${summary.groundedClaimCount} real claim(s).`,
+    "",
+    "Grounding claims:",
+    ...(claimLines.length > 0 ? claimLines : ["(none)"]),
+  ].join("\n");
+}
+
+/**
+ * DEVELOPMENT ONLY — deterministic, rule-based, derived from the
+ * product's own real BusinessHealth/kill-intelligence/budget/margin/
+ * concentration facts, same discipline as buildDevLaunchOperationsFixture.
+ * Rule order (docs/M8_ARCHITECTURE_PROPOSAL.md §22): the kill signal
+ * and hard budget/margin/concentration/grounding problems are checked
+ * before any positive action is ever considered.
+ */
+function buildDevBusinessActionFixture(summary: BusinessActionSummary, groundedClaims: readonly Claim[]): BusinessActionDecision {
+  const citedClaimIds = groundedClaims.map((c) => c.id);
+  if (citedClaimIds.length === 0) {
+    throw new ValidationError("Cannot produce a business-action recommendation with no grounding claims.");
+  }
+
+  if (summary.killRecommendation === "PREPARE_KILL_REVIEW") {
+    return {
+      action: "PREPARE_KILL_REVIEW",
+      reasoning: `[DEV FIXTURE] Combined kill risk ${summary.combinedKillRiskScore.toFixed(2)} crosses the threshold for a kill review — real post-launch evidence, not merely a stale pre-launch projection.`,
+      citedClaimIds,
+      confidence: 0.7,
+    };
+  }
+  if (summary.budgetExceeded) {
+    return {
+      action: "REDUCE_COST",
+      reasoning: "[DEV FIXTURE] Estimated monthly operating cost exceeds the founder-configured budget ceiling — this must be resolved before further investment.",
+      citedClaimIds,
+      confidence: 0.75,
+    };
+  }
+  if (summary.grossMarginPct !== null && summary.grossMarginPct < MARGIN_SUSTAINABLE_FLOOR_FOR_CEO) {
+    return {
+      action: "CHANGE_PRICING",
+      reasoning: `[DEV FIXTURE] Gross margin ${(summary.grossMarginPct * 100).toFixed(1)}% is below the ${MARGIN_SUSTAINABLE_FLOOR_FOR_CEO * 100}% floor — the current price/cost structure does not sustain the business.`,
+      citedClaimIds,
+      confidence: 0.6,
+    };
+  }
+  if (summary.revenueConcentrationRisk) {
+    return {
+      action: "REQUEST_HUMAN_REVIEW",
+      reasoning: "[DEV FIXTURE] Revenue is concentrated in a small number of subscriptions — a positive trend driven by one customer is not the same as broad-based traction; a human should weigh this before further investment.",
+      citedClaimIds,
+      confidence: 0.5,
+    };
+  }
+  if (summary.groundedClaimCount < 2) {
+    return {
+      action: "REQUEST_HUMAN_REVIEW",
+      reasoning: `[DEV FIXTURE] Only ${summary.groundedClaimCount} real business claim(s) ground this recommendation — too thin to confidently recommend anything more specific.`,
+      citedClaimIds,
+      confidence: 0.4,
+    };
+  }
+  if (summary.killRecommendation === "INVESTIGATE" || summary.killRecommendation === "REDUCE_INVESTMENT") {
+    return {
+      action: "INVESTIGATE_CHURN",
+      reasoning: `[DEV FIXTURE] Kill intelligence recommends ${summary.killRecommendation} — retention/churn signals warrant investigation before any further investment decision.`,
+      citedClaimIds,
+      confidence: 0.55,
+    };
+  }
+  if (summary.businessHealthState === "STAGNATING" || summary.businessHealthState === "DECLINING") {
+    return {
+      action: "IMPROVE_PRODUCT",
+      reasoning: `[DEV FIXTURE] BusinessHealth is ${summary.businessHealthState} — the product itself needs work before more investment is warranted.`,
+      citedClaimIds,
+      confidence: 0.55,
+    };
+  }
+  if (summary.businessHealthState === "HEALTHY" || summary.businessHealthState === "PROMISING") {
+    return {
+      action: "INVEST",
+      reasoning: `[DEV FIXTURE] BusinessHealth is ${summary.businessHealthState} with composite score ${summary.compositeScore.toFixed(2)}, no budget/margin/concentration problem, and adequate grounding — a real case for further investment.`,
+      citedClaimIds,
+      confidence: 0.65,
+    };
+  }
+  return {
+    action: "REQUEST_HUMAN_REVIEW",
+    reasoning: `[DEV FIXTURE] BusinessHealth state ${summary.businessHealthState} does not clear the bar for a confident automated recommendation.`,
+    citedClaimIds,
+    confidence: 0.4,
+  };
+}
+
 /**
  * The CEO (docs/M4_ARCHITECTURE_PROPOSAL.md §12-14) — bounded
  * reasoning over already-validated claims, never a re-derivation of
@@ -944,6 +1094,125 @@ export const ceoReasoningService = {
           actorType: "AGENT",
           actorId: params.agentId,
           action: `CEO_LAUNCH_OPERATIONS_RECOMMENDATION_${decision.action}`,
+          resourceType: "PRODUCT",
+          resourceId: params.productId,
+          result: "SUCCESS",
+          metadata: { recommendationId: recommendation.id, confidence: decision.confidence, ...summary },
+        });
+        await eventBus.publish({
+          type: "CEO_RECOMMENDATION_ISSUED",
+          payload: { recommendationId: recommendation.id, opportunityId: product.opportunityId, productId: params.productId, action: decision.action, confidence: decision.confidence },
+        });
+
+        return { recommendation };
+      },
+      CEO_REASONING_BUDGET,
+    );
+  },
+
+  /**
+   * The fifth, distinct entry point (docs/M8_ARCHITECTURE_PROPOSAL.md
+   * §22) — "given everything we now observe about how this business is
+   * actually doing, what should happen next," asked of a LIVE (or
+   * PAUSED) product once its intelligence agents have run and a
+   * BusinessHealth snapshot exists. Same agent row, same zero-tool-
+   * call/zero-permission boundary, same bounded budget, same shared
+   * ceo_recommendations table. Recommends only — INVEST never itself
+   * spends, PREPARE_KILL_REVIEW/KILL never itself changes Product
+   * status; a human decides through BusinessReviewMemo (§23, §25).
+   */
+  async recommendBusinessAction(params: { agentId: string; productId: string; startedBy: AuthenticatedActor }): Promise<RunOutcome<CeoReasoningResult>> {
+    const product = await productRepository.findById(params.productId);
+    if (!product) throw new NotFoundError("Product", params.productId);
+    const health = await businessHealthRepository.findLatestForProduct(params.productId);
+    if (!health) throw new ValidationError(`Product ${params.productId} has no BusinessHealth snapshot yet — the intelligence agents must run first.`);
+
+    const scoreRecords = await opportunityRepository.listScoreRecords(product.opportunityId);
+    const killAssessment = killIntelligenceService.assess({
+      priorOpportunityKillRiskScore: scoreRecords[0]?.killRiskScore ?? 0,
+      retentionHealth: health.customerHealth,
+      revenueHealth: health.revenueHealth,
+      growthHealth: health.growthHealth,
+      marginHealth: health.marginHealth,
+      evidenceConfidence: health.evidenceConfidence,
+    });
+
+    const [costMetric, marginMetric] = await Promise.all([
+      businessMetricRepository.findLatestForProductByType(params.productId, "MONTHLY_OPERATING_COST_USD"),
+      businessMetricRepository.findLatestForProductByType(params.productId, "GROSS_MARGIN_PCT"),
+    ]);
+    const budgetCheck = checkLaunchBudget({ estimatedMonthlyCostUsd: costMetric?.value ?? 0 });
+
+    const activeSubs = await createRevenueProvider().listSubscriptionsAsOf(params.productId, new Date());
+    const concentration = checkRevenueConcentration(activeSubs.map((s) => s.monthlyValueUsd));
+
+    const claims = await claimRepository.listForOpportunity(product.opportunityId);
+    const groundedClaims = claims.filter((c) => BUSINESS_RELEVANT_CLAIM_TYPES.has(c.claimType));
+
+    const summary: BusinessActionSummary = {
+      businessHealthState: health.state,
+      compositeScore: health.compositeScore,
+      killRecommendation: killAssessment.recommendation,
+      combinedKillRiskScore: killAssessment.combinedKillRiskScore,
+      budgetExceeded: budgetCheck.budgetExceeded,
+      grossMarginPct: marginMetric?.value ?? null,
+      revenueConcentrationRisk: concentration.isConcentrated,
+      groundedClaimCount: groundedClaims.length,
+    };
+
+    const execution = await agentRuntimeService.startExecution({
+      agentId: params.agentId,
+      taskId: null,
+      input: { productId: params.productId, mode: "BUSINESS_ACTION" },
+      startedBy: params.startedBy,
+    });
+
+    return agentRuntimeService.run(
+      execution.id,
+      async (handle) => {
+        handle.step();
+        const { value: decision } = await completeWithValidation(handle.callModel, businessActionDecisionSchema, {
+          systemPrompt: CEO_BUSINESS_SYSTEM_PROMPT,
+          maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
+          messages: [{ role: "user", content: buildBusinessActionPrompt(summary, groundedClaims) }],
+          devFixtureResponse: buildDevBusinessActionFixture(summary, groundedClaims),
+        });
+
+        await handle.transition("PROCESSING_RESULT");
+        handle.step();
+
+        const validClaimIds = new Set(groundedClaims.map((c) => c.id));
+        const citedClaimIds = decision.citedClaimIds.filter((id) => validClaimIds.has(id));
+        if (citedClaimIds.length === 0) {
+          throw new ValidationError("Business-action recommendation cited no real, verifiable claim id — refusing to persist an ungrounded recommendation.");
+        }
+
+        const priorityScore = computeDecisionPriority({
+          opportunityScore: PLACEHOLDER_NEUTRAL_SCORE,
+          confidenceScore: decision.confidence,
+          killRiskScore: killAssessment.combinedKillRiskScore,
+          topEvidenceGapImpactScore: PLACEHOLDER_NEUTRAL_SCORE,
+          maxClaimEIG: PLACEHOLDER_NEUTRAL_SCORE,
+          estimatedResearchCost: PLACEHOLDER_NEUTRAL_SCORE,
+          timeSensitivityScore: PLACEHOLDER_NEUTRAL_SCORE,
+          strategicFitScore: PLACEHOLDER_NEUTRAL_SCORE,
+        });
+
+        const recommendation = await ceoRecommendationRepository.create({
+          opportunityId: product.opportunityId,
+          decisionCycleId: null,
+          action: decision.action,
+          reasoning: decision.reasoning,
+          citedClaimIds: toJsonString(citedClaimIds),
+          citedValidationReportIds: toJsonString([]),
+          confidence: decision.confidence,
+          priorityScore,
+        });
+
+        await auditService.record({
+          actorType: "AGENT",
+          actorId: params.agentId,
+          action: `CEO_BUSINESS_ACTION_RECOMMENDATION_${decision.action}`,
           resourceType: "PRODUCT",
           resourceId: params.productId,
           result: "SUCCESS",

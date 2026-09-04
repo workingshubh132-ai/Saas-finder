@@ -5,11 +5,11 @@ import { makeOpportunity } from "../helpers.js";
 import { humanOwner } from "../setup.js";
 
 describe("claimExtractionService.extractForOpportunity", () => {
-  it("extracts exactly the twelve claim types, each with a valid importance and a real, non-empty statement", async () => {
+  it("extracts exactly the thirteen claim types, each with a valid importance and a real, non-empty statement", async () => {
     const opportunity = await makeOpportunity();
     const claims = await claimExtractionService.extractForOpportunity({ opportunityId: opportunity.id, actorType: "SYSTEM", actorId: null });
 
-    expect(claims).toHaveLength(12);
+    expect(claims).toHaveLength(13);
     expect(new Set(claims.map((c) => c.claimType))).toEqual(new Set(CLAIM_TYPES));
     for (const claim of claims) {
       expect(claim.statement.length).toBeGreaterThan(0);
@@ -39,12 +39,12 @@ describe("claimExtractionService.extractForOpportunity", () => {
     expect(customerProblemClaim.extractedFrom).toBe("OPPORTUNITY.problem");
   });
 
-  it("is idempotent — a second call returns the same 12 rows, never duplicates them", async () => {
+  it("is idempotent — a second call returns the same 13 rows, never duplicates them", async () => {
     const opportunity = await makeOpportunity();
     const first = await claimExtractionService.extractForOpportunity({ opportunityId: opportunity.id, actorType: "SYSTEM", actorId: null });
     const second = await claimExtractionService.extractForOpportunity({ opportunityId: opportunity.id, actorType: "SYSTEM", actorId: null });
 
-    expect(second).toHaveLength(12);
+    expect(second).toHaveLength(13);
     expect(second.map((c) => c.id).sort()).toEqual(first.map((c) => c.id).sort());
   });
 });
@@ -57,6 +57,6 @@ describe("claimExtractionService with an actor attributed", () => {
   it("accepts a HUMAN actor for attribution without error", async () => {
     const opportunity = await makeOpportunity();
     const claims = await claimExtractionService.extractForOpportunity({ opportunityId: opportunity.id, actorType: "HUMAN", actorId: humanOwner.actorId });
-    expect(claims).toHaveLength(12);
+    expect(claims).toHaveLength(13);
   });
 });

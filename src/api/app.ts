@@ -1,20 +1,28 @@
 import express, { type Express } from "express";
 import { agentExecutionsRouter } from "./routes/agent-executions.routes.js";
 import { agentsRouter } from "./routes/agents.routes.js";
+import { anomaliesRouter } from "./routes/anomalies.routes.js";
 import { auditRouter } from "./routes/audit.routes.js";
 import { authorizeRouter } from "./routes/authorize.routes.js";
 import { billingAccountsRouter } from "./routes/billing-accounts.routes.js";
 import { billingPlansRouter } from "./routes/billing-plans.routes.js";
 import { billingWebhooksRouter } from "./routes/billing-webhooks.routes.js";
+import { businessHealthsRouter } from "./routes/business-healths.routes.js";
 import { businessMetricsRouter } from "./routes/business-metrics.routes.js";
+import { businessReviewMemosRouter } from "./routes/business-review-memos.routes.js";
 import { ceoRecommendationsRouter } from "./routes/ceo-recommendations.routes.js";
+import { cohortsRouter } from "./routes/cohorts.routes.js";
 import { claimsRouter } from "./routes/claims.routes.js";
 import { competitorsRouter } from "./routes/competitors.routes.js";
 import { deploymentPlansRouter } from "./routes/deployment-plans.routes.js";
 import { deploymentsRouter } from "./routes/deployments.routes.js";
 import { goToMarketPlansRouter } from "./routes/go-to-market-plans.routes.js";
+import { growthExperimentsRouter } from "./routes/growth-experiments.routes.js";
 import { incidentsRouter } from "./routes/incidents.routes.js";
 import { launchReviewMemosRouter } from "./routes/launch-review-memos.routes.js";
+import { learningRecordsRouter } from "./routes/learning-records.routes.js";
+import { portfolioRouter } from "./routes/portfolio.routes.js";
+import { predictionOutcomesRouter } from "./routes/prediction-outcomes.routes.js";
 import { pricingModelsRouter } from "./routes/pricing-models.routes.js";
 import { supportCasesRouter } from "./routes/support-cases.routes.js";
 import { customerDiscoveryMemosRouter } from "./routes/customer-discovery-memos.routes.js";
@@ -104,6 +112,15 @@ export function createApp(): Express {
   app.use("/api/incidents", incidentsRouter);
   app.use("/api/support-cases", supportCasesRouter);
   app.use("/api/launch-review-memos", launchReviewMemosRouter);
+
+  app.use("/api/growth-experiments", growthExperimentsRouter);
+  app.use("/api/business-healths", businessHealthsRouter);
+  app.use("/api/anomalies", anomaliesRouter);
+  app.use("/api/cohorts", cohortsRouter);
+  app.use("/api/business-review-memos", businessReviewMemosRouter);
+  app.use("/api/portfolio", portfolioRouter);
+  app.use("/api/prediction-outcomes", predictionOutcomesRouter);
+  app.use("/api/learning-records", learningRecordsRouter);
 
   app.use(errorHandler);
 

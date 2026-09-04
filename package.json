@@ -21,6 +21,7 @@
     "demo:m5": "tsx scripts/demo-m5.ts",
     "demo:m6": "tsx scripts/demo-m6.ts",
     "demo:m7": "tsx scripts/demo-m7.ts",
+    "demo:m8": "tsx scripts/demo-m8.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "db:push": "prisma db push"

@@ -16,10 +16,10 @@ describe("decisionCycleService.run", () => {
     });
 
     expect(result.cycle.status).toBe("COMPLETED");
-    expect(result.claimsExtracted).toBe(12);
-    expect(result.claimsValidated).toBe(12);
+    expect(result.claimsExtracted).toBe(13);
+    expect(result.claimsValidated).toBe(13);
     expect(result.ceoRecommendation).not.toBeNull();
-    expect(result.cycle.claimsValidated).toBe(12);
+    expect(result.cycle.claimsValidated).toBe(13);
   });
 
   it("is safe to run twice on the same opportunity — no duplicate claims, a second historized CeoRecommendation", async () => {
@@ -30,10 +30,10 @@ describe("decisionCycleService.run", () => {
     const second = await decisionCycleService.run({ opportunityId: opportunity.id, evidenceValidatorAgentId: agents.validatorAgent.id, ceoAgentId: agents.ceoAgent.id, startedBy: authActor() });
 
     expect(second.cycle.status).toBe("COMPLETED");
-    expect(second.claimsExtracted).toBe(12);
+    expect(second.claimsExtracted).toBe(13);
 
     const claimCount = await prisma.claim.count({ where: { opportunityId: opportunity.id } });
-    expect(claimCount).toBe(12);
+    expect(claimCount).toBe(13);
     const recommendationCount = await prisma.ceoRecommendation.count({ where: { opportunityId: opportunity.id } });
     expect(recommendationCount).toBe(2);
   });

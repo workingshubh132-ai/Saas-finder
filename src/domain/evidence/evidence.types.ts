@@ -8,6 +8,9 @@ export const EVIDENCE_SOURCE_TYPES = [
   "INTERNAL",
   "EXPERIMENT",
   "OTHER",
+  // M8 (docs/M8_ARCHITECTURE_PROPOSAL.md §21, §39) — a business claim's own evidence traces to a real,
+  // computed BusinessMetric, a genuinely distinct source from every pre-launch type above.
+  "BUSINESS_METRIC",
 ] as const;
 export type EvidenceSourceType = (typeof EVIDENCE_SOURCE_TYPES)[number];
 

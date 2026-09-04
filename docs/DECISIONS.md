@@ -1156,3 +1156,194 @@ verification actually found:
   those Restrict-linked children still existed. Fixed by adding the
   M7 tables to `resetDatabase()` in FK-safe order, mirroring the
   file's own existing M3/M4/M5/M6 blocks exactly.
+
+## 65. Zero new Guardian permissions for M8
+
+Going into M8's own Phase 0 audit, it seemed plausible that "read
+revenue data," "read analytics," and "run a growth experiment" would
+each need a new permission the way M7's `DEPLOY_PRODUCTION`/
+`ACTIVATE_BILLING` did. They do not. Every M8 agent
+(Product Intelligence, Revenue Analyst, Growth Analyst, Customer
+Intelligence, Experiment Analyst, Portfolio Analyst) only ever reads
+provider data and persists its own analysis — a `create` on an already-
+GREEN table, never a `WRITE_DATABASE` grant above GREEN, never a tool
+call gated above GREEN at all (`docs/M8_ARCHITECTURE_PROPOSAL.md` §24,
+verified directly by `tests/integration/m8-security.test.ts`'s own
+least-privilege sweep). The one genuinely consequential action M8 adds
+— starting a `GrowthExperiment` (`APPROVED -> RUNNING`) — reuses #58's
+own PLAN/APPROVE/EXECUTE mechanism verbatim:
+`growthExperimentExecutionService.approveToRun` is `assertHumanActor`-
+gated, never a Guardian grant, the same "a verified human exercising
+their own authority directly is a structurally different, already-
+precedented event" reasoning #58 already established. `PERMISSIONS`
+(`src/domain/permission/permission.js`) gains no new entries for M8 —
+a real, load-bearing finding, not an oversight.
+
+## 66. Two orchestrators, not one Cycle wrapper
+
+M3-M7 each introduced one bounded orchestration entry point per
+milestone (`researchCycleService`, `decisionCycleService`,
+`launchOperationsService.planLaunch`, `productFactoryService.build`).
+M8 introduces two, deliberately: `businessIntelligenceService.analyze()`
+(per-product — runs the four intelligence agents, extracts/updates real
+claims, computes one `BusinessHealth` snapshot, then CEO -> Chairman ->
+`BusinessReviewMemo`) and `portfolioService.analyzePortfolio()`
+(cross-product — the Portfolio Analyst compares already-analyzed
+products and, for every RETIRE/PIVOT recommendation, *re-invokes* the
+exact same per-product CEO -> Chairman -> Memo chain
+`businessIntelligenceService` itself uses, never a second, bypassing
+governance path). Rejected: one `Cycle`-style wrapper parameterized by
+"single product or many," mirroring the earlier #12 (this repository's
+M2-era) decision to keep the boundary between two genuinely different
+questions ("how healthy is this one business" vs. "how should the
+portfolio be allocated") explicit in the code, not folded into one
+function with a mode flag.
+
+## 67. Claim-type reuse mapping — five of seven brief-suggested conclusions already had a home
+
+The M8 brief sketches seven example claim conclusions a business
+review might reach. Five map 1:1 onto M4's own 12 existing claim types
+rather than needing a new one: `CUSTOMERS_ARE_WILLING_TO_PAY` →
+`WILLINGNESS_TO_PAY`, `RETENTION_IS_HEALTHY` → `RETENTION`,
+`CHANNEL_IS_EFFECTIVE` → `DISTRIBUTION`, `MARGIN_IS_SUSTAINABLE` →
+`ECONOMICS`, `CUSTOMER_SEGMENT_IS_STRONG` → `CUSTOMER_SEGMENT`. Only
+`GROWTH_TRAJECTORY` (importance `HIGH`) is genuinely new — no existing
+type captures "is this business growing," and inventing two
+opposite-direction types (e.g. a separate "declining" type) was
+rejected because it would break the codebase's own "every claim type
+appears exactly once in `CLAIM_TYPE_IMPORTANCE`" invariant for no real
+benefit; direction lives in the claim's `statement`/`confidence`, not
+in a second type. `businessClaimExtractionService.upsertClaim` extends
+M4's existing `Claim`/`Evidence`/`ClaimEvidence` architecture directly
+— no second, parallel claim system for post-launch evidence.
+
+## 68. Two separate `computeUnitEconomics` functions, deliberately never merged
+
+`src/domain/pricing-model/unit-economics.ts` (M7) projects CAC/LTV
+*before* a product launches, from assumptions a human supplies.
+`src/domain/revenue-intelligence/unit-economics.ts` (M8) measures the
+same shape of numbers *after* launch, from real `RevenueProvider`
+history. Both files exist, both export a function of the same name in
+different modules, and neither imports the other. Rejected: one shared
+function taking a "mode: projected | observed" flag — Section 1's own
+non-negotiable (OBSERVED/ESTIMATED/INFERRED/PREDICTED must never blur
+together) applies exactly as much to *which function computed a
+number* as it does to the `valueKind` column on the row it produces;
+merging the two would make it one accidental refactor away from a
+pre-launch guess and a post-launch measurement silently sharing a code
+path. `MIN_LTV_HISTORY_MONTHS = 3` (M8's own function) is a second,
+independently-justified floor — the M7 function has no such floor
+because it never had real history to require a minimum of.
+
+## 69. Kill intelligence reuses `DeterministicKillRiskScorer` directly — and its own thresholds needed recalibrating against that reuse
+
+Per the brief's own explicit instruction (§27: "reuse M4's kill-risk
+system, do not create another independent kill-score architecture"),
+`killIntelligenceService.assess()` calls the exact same
+`DeterministicKillRiskScorer` class M3/M4 already built
+(`src/services/kill-risk-scorer.ts`), unmodified. Only 5 of its 11
+weighted dimensions ever carry a real M8 signal
+(`weakDemand`/`weakWillingnessToPay`/`badDistribution`/`lowRetention`/
+`lowMargins`, plus `insufficientEvidence`) — `crowdedMarket`/
+`poorDifferentiation`/`technicalDifficulty`/`regulatoryRisk`/
+`platformDependency` are pre-launch-only concepts with no post-launch
+equivalent and are left at `0`, honestly, rather than guessed. That
+leaves those five dimensions' combined weight (0.41 of the scorer's
+1.0) permanently unearned, capping the achievable
+`scored.killRiskScore` at 0.59 and the `PRIOR_WEIGHT`/`OBSERVED_WEIGHT`
+blend this service computes at ≈0.713 in the worst case. The first
+draft's thresholds (`CONTINUE_CEILING=0.35`, `INVESTIGATE_CEILING=0.55`,
+`REDUCE_INVESTMENT_CEILING=0.75`) were copied from an assumed full 0..1
+range and made `PREPARE_KILL_REVIEW` mathematically unreachable under
+any input — caught by `tests/unit/m8-domain.test.ts`'s own "genuinely
+failing product" case never reaching it. Recalibrated to
+`0.25`/`0.40`/`0.55` against the real 0..0.713 achievable range
+(worked example in `src/services/kill-intelligence.service.ts`'s own
+comment), verified against both a healthy scenario (combined ≈ 0.07 →
+`CONTINUE`) and a genuinely failing one (combined ≈ 0.65 →
+`PREPARE_KILL_REVIEW`). The scorer itself was never touched — only the
+thresholds a caller applies to its output, exactly the boundary the
+brief's own reuse instruction draws.
+
+## 70. Real bugs this build caught before they shipped
+
+Continuing the M3/M5/M6/M7 precedent (#37, #45, #56, #64) of naming
+what verification actually found — this milestone's list is longer
+than usual because writing the five mandatory capstone tests
+(`tests/integration/m8-capstone-*.test.ts`) was the first time
+`businessIntelligenceService.analyze()` had ever been exercised
+end-to-end; every bug below was invisible to `tests/unit/m8-domain.test.ts`'s
+own pure-function coverage and to `npx tsc`/`eslint`, and surfaced only
+once real data flowed through the real pipeline:
+
+- **A claim-extraction crash affecting every opportunity, not just
+  M8's own**: `claimExtractionService.extractForOpportunity` (M4)
+  iterates every entry in `CLAIM_TYPES` looking for either a bespoke
+  `switch` case or a `DIMENSION_CLAIM_TYPES` mapping. Widening
+  `CLAIM_TYPES` from 12 to 13 to add `GROWTH_TRAJECTORY` (#67) without
+  adding either gave every single opportunity extraction in the whole
+  system — M1 through M8 alike — an unconditional
+  `throw new Error("Claim type GROWTH_TRAJECTORY has no dimension
+  mapping...")`, since `GROWTH_TRAJECTORY` is a genuinely post-launch
+  concept with no opportunity-stage dimension to map to. Caught the
+  moment `tests/integration/m8-security.test.ts` first called
+  `makeLiveProduct()` (which extracts claims deep in its own chain);
+  fixed with an honest placeholder case ("no growth trajectory data
+  exists yet — this is a post-launch signal"), the same pattern
+  `DISTRIBUTION`'s own no-data branch already uses, later overwritten
+  with a real value by `businessClaimExtractionService.upsertClaim`
+  once a product is actually LIVE. Four pre-existing M4 tests
+  (`tests/integration/claim-extraction.test.ts`,
+  `tests/integration/m4-end-to-end.test.ts`,
+  `tests/integration/decision-cycle.test.ts`,
+  `tests/integration/investment-memo.test.ts`) hard-coded the old
+  count of 12 claims and needed updating to 13 alongside the fix.
+- **Two INFERRED metrics recorded with no citation**:
+  `metricEngineService.computeAndRecordRevenueMetrics`'s `ARR`/`ARPU`
+  rows and `revenueAnalystService.run`'s own `GROSS_MARGIN_PCT` row all
+  passed `valueKind: "INFERRED"` to `businessMetricRepository.create`
+  with either no `inputMetricIds` at all or a hard-coded empty array —
+  `assertMetricProvenance`'s own rule ("INFERRED requires at least one
+  inputMetricIds entry," #9 of `docs/M8_ARCHITECTURE_PROPOSAL.md`)
+  throws on both. Every one of the five mandatory capstones hit this
+  the first time real revenue data existed. Fixed by capturing the id
+  of the `MRR`/`MONTHLY_OPERATING_COST_USD` row each figure is actually
+  derived from and citing it — the exact provenance chain Section 1's
+  non-negotiable exists to enforce, which is precisely why the schema
+  caught it instead of silently accepting an uncited number.
+- **Two hand-added CHECK constraints never widened for M8's own new
+  values**: `evidence.source_type`'s CHECK (unchanged since M1, last
+  touched in M3) didn't include `'BUSINESS_METRIC'`, which
+  `businessClaimExtractionService.upsertClaim` passes on every call;
+  `ceo_recommendations.action`'s CHECK (last widened in M7) didn't
+  include six of M8's eleven `BUSINESS_ACTIONS` (`INVEST`,
+  `RUN_EXPERIMENT`, `CHANGE_CHANNEL`, `INVESTIGATE_CHURN`,
+  `PAUSE_GROWTH`, `PREPARE_KILL_REVIEW` — the other five were already
+  present, reused verbatim from M4/M7's own action vocabularies). Both
+  are exactly the class of bug this codebase's own "hand-add a CHECK
+  constraint via a RedefineTables block, because Prisma's SQLite
+  connector doesn't emit one from the schema" discipline exists to
+  catch at write time rather than silently accepting an invalid string
+  — and both were genuinely missed during the original M8 migration
+  authoring because Prisma's own schema diffing has no way to surface
+  a hand-written SQL constraint as "needs updating." Fixed with two
+  more `RedefineTables` blocks in the same M8 migration file, following
+  the exact pattern its own `business_metrics`/`claims`/
+  `customer_evidence` widenings already used (full column list,
+  `PRAGMA defer_foreign_keys`, reindex).
+- **A state-classification boundary bug, not a data bug**:
+  `deriveBusinessHealth`'s `EARLY_EVIDENCE_THRESHOLD` was originally
+  `0.3` with a strict `<` comparison — but every one of the four
+  intelligence agents' own "insufficient data" fallback confidence is
+  *exactly* `0.3`, so a brand-new LIVE product with zero real signal in
+  all four dimensions has `evidenceConfidence === 0.3` exactly, missed
+  the `< 0.3` check by equality, and fell through to the raw-score
+  ladder below — where zero signal in every dimension reads as
+  `CRITICAL`, the worst possible misclassification for a product that
+  has been live for minutes, not one that is failing. Caught while
+  designing `tests/integration/m8-capstone-negative.test.ts`'s own
+  zero-data scenario, before the test was ever run. Fixed by raising
+  the threshold to `0.35` — comfortably above the true all-insufficient
+  floor of `0.3`, comfortably below the `0.375` floor one agent with
+  real data would produce — restoring the intent the threshold's own
+  comment already stated ("EARLY, regardless of the raw scores").

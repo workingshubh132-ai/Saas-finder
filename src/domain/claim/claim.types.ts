@@ -1,10 +1,20 @@
 /**
  * `Claim` — the falsifiable unit of assertion underneath an
  * Opportunity's dimension-level scores (docs/M4_ARCHITECTURE_PROPOSAL.md
- * §3). Exactly twelve types, matching the M4 brief's own list —
- * "do not create unnecessary claim types" — each traceable to a field
- * VentureForge already computes (a Problem field, a scored dimension,
- * or a CompetitorObservation), never invented content.
+ * §3). Twelve types matched the M4 brief's own list — "do not create
+ * unnecessary claim types" — each traceable to a field VentureForge
+ * already computes, never invented content. M8 adds exactly one
+ * (docs/M8_ARCHITECTURE_PROPOSAL.md §21): five of the M8 brief's own
+ * seven example business conclusions already had a home in the
+ * existing twelve (CUSTOMERS_ARE_WILLING_TO_PAY -> WILLINGNESS_TO_PAY,
+ * RETENTION_IS_HEALTHY -> RETENTION, CHANNEL_IS_EFFECTIVE ->
+ * DISTRIBUTION, MARGIN_IS_SUSTAINABLE -> ECONOMICS,
+ * CUSTOMER_SEGMENT_IS_STRONG -> CUSTOMER_SEGMENT); PRODUCT_IS_GROWING/
+ * PRODUCT_IS_DECLINING are one dimension in opposite directions
+ * (exactly like every existing type already carries either polarity in
+ * its free-text `statement`), so GROWTH_TRAJECTORY is the only new
+ * type — adding two would have broken "every claim type appears
+ * exactly once" in CLAIM_TYPE_IMPORTANCE below.
  */
 export const CLAIM_TYPES = [
   "CUSTOMER_PROBLEM",
@@ -19,6 +29,7 @@ export const CLAIM_TYPES = [
   "BUILDABILITY",
   "TIMING",
   "ECONOMICS",
+  "GROWTH_TRAJECTORY",
 ] as const;
 export type ClaimType = (typeof CLAIM_TYPES)[number];
 
@@ -51,6 +62,11 @@ export const CLAIM_TYPE_IMPORTANCE: Readonly<Record<ClaimType, ClaimImportance>>
   CUSTOMER_SEGMENT: "HIGH",
   DISTRIBUTION: "HIGH",
   COMPETITIVE_POSITION: "HIGH",
+  // M8 (docs/M8_ARCHITECTURE_PROPOSAL.md §21) — HIGH: a declining
+  // product materially changes viability without necessarily
+  // invalidating the original problem, the same reasoning this table's
+  // own docstring already uses for its HIGH tier.
+  GROWTH_TRAJECTORY: "HIGH",
   FREQUENCY: "MEDIUM",
   MARKET_SIZE: "MEDIUM",
   DIFFERENTIATION: "MEDIUM",

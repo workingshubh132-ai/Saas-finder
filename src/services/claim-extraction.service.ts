@@ -144,6 +144,12 @@ export const claimExtractionService = {
                 confidence: ASSUMPTION_PRIOR_CONFIDENCE,
               };
 
+        case "GROWTH_TRAJECTORY":
+          // Post-launch-only signal (docs/M8_ARCHITECTURE_PROPOSAL.md §21) — genuinely unobservable at
+          // opportunity-extraction time (M4, pre-launch). An honest placeholder, never a fabricated guess;
+          // businessClaimExtractionService.upsertClaim (M8) updates this exact claim once real growth data exists.
+          return { claimType, statement: "No growth trajectory data exists yet — this is a post-launch signal, not observable before a product is LIVE.", extractedFrom: null, confidence: NO_DATA_PRIOR_CONFIDENCE };
+
         case "DISTRIBUTION":
           return distributionChannels.length > 0
             ? {

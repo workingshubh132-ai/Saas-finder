@@ -1,11 +1,16 @@
 import { Router } from "express";
 import { z } from "zod";
+import { businessHealthRepository } from "../../db/repositories/business-health.repository.js";
+import { businessReviewMemoRepository } from "../../db/repositories/business-review-memo.repository.js";
 import { engineeringTaskRepository } from "../../db/repositories/engineering-task.repository.js";
 import { launchPlanRepository } from "../../db/repositories/launch-plan.repository.js";
 import { launchReviewMemoRepository } from "../../db/repositories/launch-review-memo.repository.js";
 import { mvpArchitectureRepository } from "../../db/repositories/mvp-architecture.repository.js";
 import { productReviewMemoRepository } from "../../db/repositories/product-review-memo.repository.js";
 import { productSpecRepository } from "../../db/repositories/product-spec.repository.js";
+import { BUSINESS_METRIC_TYPES } from "../../domain/business-metric/business-metric.types.js";
+import { businessIntelligenceService } from "../../services/business-intelligence.service.js";
+import { experimentAnalystService } from "../../services/experiment-analyst.service.js";
 import { launchOperationsService } from "../../services/launch-operations.service.js";
 import { productFactoryService } from "../../services/product-factory.service.js";
 import { productService } from "../../services/product.service.js";
@@ -157,5 +162,62 @@ productsRouter.post(
     const body = req.body as z.infer<typeof planLaunchSchema>;
     const summary = await launchOperationsService.planLaunch({ productId: requireParam(req, "id"), ...body, startedBy: getActor(req) });
     res.status(201).json(summary);
+  }),
+);
+
+productsRouter.get(
+  "/:id/business-healths",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await businessHealthRepository.listForProduct(requireParam(req, "id")));
+  }),
+);
+
+productsRouter.get(
+  "/:id/business-review-memos",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await businessReviewMemoRepository.listForProduct(requireParam(req, "id")));
+  }),
+);
+
+const analyzeBusinessSchema = z.object({
+  productIntelligenceAgentId: z.string().min(1),
+  revenueAnalystAgentId: z.string().min(1),
+  growthAnalystAgentId: z.string().min(1),
+  customerIntelligenceAgentId: z.string().min(1),
+  ceoAgentId: z.string().min(1),
+});
+
+/**
+ * The business-intelligence pipeline, over HTTP
+ * (docs/M8_ARCHITECTURE_PROPOSAL.md §2) — runs the four intelligence
+ * agents, extracts real claims, computes BusinessHealth, and drives
+ * the result all the way to a compiled BusinessReviewMemo. Never
+ * itself invests, changes pricing, or kills anything — recommendations
+ * only.
+ */
+productsRouter.post(
+  "/:id/analyze-business",
+  requireAuth(),
+  validateBody(analyzeBusinessSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.body as z.infer<typeof analyzeBusinessSchema>;
+    const summary = await businessIntelligenceService.analyze({ productId: requireParam(req, "id"), ...body, startedBy: getActor(req) });
+    res.status(201).json(summary);
+  }),
+);
+
+const proposeExperimentSchema = z.object({ agentId: z.string().min(1), targetMetricType: z.enum(BUSINESS_METRIC_TYPES) });
+
+/** Turns uncertainty into a controlled experiment proposal (docs/M8_ARCHITECTURE_PROPOSAL.md §14, §26) — a PLAN only, never runs anything itself. */
+productsRouter.post(
+  "/:id/propose-experiment",
+  requireAuth(),
+  validateBody(proposeExperimentSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.body as z.infer<typeof proposeExperimentSchema>;
+    const outcome = await experimentAnalystService.run({ productId: requireParam(req, "id"), ...body, startedBy: getActor(req) });
+    res.status(201).json(outcome);
   }),
 );

@@ -59,6 +59,20 @@ async function resetDatabase(): Promise<void> {
   await prisma.goToMarketPlan.deleteMany();
   await prisma.businessMetric.deleteMany();
   await prisma.supportCase.deleteMany();
+  // M8 leaf tables first (FK-safe order — docs/M8_ARCHITECTURE_PROPOSAL.md
+  // §32): activationDefinition/cohort/anomaly/businessHealth/
+  // portfolioSnapshot/predictionOutcome are all Cascade/SetNull from
+  // product only, so order among them doesn't matter — grouped here for
+  // readability, before product itself. growthExperiment/growthExperimentResult/
+  // learningRecord/businessReviewMemo have Restrict FKs to claim/
+  // ceoRecommendation/chairmanReview and are deleted further below,
+  // before those tables (docs/DECISIONS.md #64's own resetDatabase discipline).
+  await prisma.activationDefinition.deleteMany();
+  await prisma.cohort.deleteMany();
+  await prisma.anomaly.deleteMany();
+  await prisma.businessHealth.deleteMany();
+  await prisma.portfolioSnapshot.deleteMany();
+  await prisma.predictionOutcome.deleteMany();
   await prisma.product.deleteMany();
   // M5 leaf tables first (FK-safe order — docs/M5_ARCHITECTURE_PROPOSAL.md §22):
   // customerDiscoveryMemo references outreachExperiment/ceoRecommendation/
@@ -82,6 +96,12 @@ async function resetDatabase(): Promise<void> {
   // Restrict, so it must precede claim); investmentMemo references
   // ceoRecommendation/chairmanReview (Restrict) so it precedes both.
   await prisma.decisionRecord.deleteMany();
+  // M8 tables with Restrict FKs to claim/ceoRecommendation/chairmanReview
+  // (docs/M8_ARCHITECTURE_PROPOSAL.md §32) — must precede all three below.
+  await prisma.learningRecord.deleteMany();
+  await prisma.businessReviewMemo.deleteMany();
+  await prisma.growthExperimentResult.deleteMany();
+  await prisma.growthExperiment.deleteMany();
   await prisma.claimEvidence.deleteMany();
   await prisma.investmentMemo.deleteMany();
   await prisma.validationReport.deleteMany();

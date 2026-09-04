@@ -46,7 +46,7 @@ describe("M4 end-to-end: continue path", () => {
 
     // Opportunity -> Claims
     const claims = await claimExtractionService.extractForOpportunity({ opportunityId: opportunity.id, actorType: "SYSTEM", actorId: null });
-    expect(claims).toHaveLength(12);
+    expect(claims).toHaveLength(13);
 
     // Evidence -> Validator -> confidence update -> evidence gaps, per claim.
     for (const claim of claims) {
