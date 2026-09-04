@@ -1,5 +1,6 @@
 import { decisionRecordRepository } from "../db/repositories/decision-record.repository.js";
 import { customerDiscoveryMemoRepository } from "../db/repositories/customer-discovery-memo.repository.js";
+import { launchReviewMemoRepository } from "../db/repositories/launch-review-memo.repository.js";
 import { productReviewMemoRepository } from "../db/repositories/product-review-memo.repository.js";
 import { summarizeCalibration, type CalibrationSummary } from "../domain/decision/calibration.js";
 
@@ -48,6 +49,24 @@ export const calibrationService = {
    */
   async summarizeProductBuilds(): Promise<CalibrationSummary> {
     const memos = await productReviewMemoRepository.list();
+    const decided = memos.filter((m): m is typeof m & { humanDecision: string } => m.humanDecision !== null);
+    return summarizeCalibration(
+      decided.map((m) => ({ confidenceAtDecision: m.confidence, humanDecision: m.humanDecision })),
+      "APPROVE",
+    );
+  },
+
+  /**
+   * Same mechanism a fifth time, M7's own data
+   * (docs/M7_ARCHITECTURE_PROPOSAL.md §42): LaunchReviewMemo.confidence
+   * (min of the CEO's launch-operations recommendation confidence and
+   * the Chairman's own launch review confidence at compile time)
+   * against the memo's own humanDecision. An undecided memo
+   * (humanDecision: null) is excluded, same discipline as
+   * summarizeCustomerDiscovery/summarizeProductBuilds.
+   */
+  async summarizeLaunch(): Promise<CalibrationSummary> {
+    const memos = await launchReviewMemoRepository.list();
     const decided = memos.filter((m): m is typeof m & { humanDecision: string } => m.humanDecision !== null);
     return summarizeCalibration(
       decided.map((m) => ({ confidenceAtDecision: m.confidence, humanDecision: m.humanDecision })),

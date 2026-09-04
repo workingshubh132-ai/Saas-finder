@@ -55,6 +55,17 @@ export const DOMAIN_EVENT_TYPES = [
   "SECURITY_REVIEW_COMPLETED",
   "PRODUCT_REVIEW_MEMO_CREATED",
   "PRODUCT_READY_FOR_DEPLOYMENT",
+  // M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §2, §33 (agent_permissions.permission,
+  // events.type, and ceo_recommendations.action are all widened in the
+  // same migration that adds the M7 tables — docs/DECISIONS.md #56's
+  // named risk, fixed for all three this time).
+  "PRODUCT_DEPLOYED",
+  "PRODUCT_ROLLED_BACK",
+  "BILLING_ACTIVATED",
+  "LAUNCH_REVIEW_MEMO_CREATED",
+  "INCIDENT_DETECTED",
+  "INCIDENT_RESOLVED",
+  "SUPPORT_CASE_CREATED",
 ] as const;
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
 

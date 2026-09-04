@@ -1005,3 +1005,154 @@ actually found, not just what was intended:
   implemented it — a value that would pass one validation layer only
   to fail at the next with a confusing error. Fixed by removing it
   from the domain list.
+
+## 57. RiskLevel is already GREEN/YELLOW/ORANGE/RED — no core change for M7
+
+Going into M7's own Phase 0 audit, it was an open question whether a
+4th risk tier needed to be added to support the brief's own
+GREEN/YELLOW/ORANGE/RED framing. It did not: `src/domain/risk/risk-level.ts`
+has defined exactly this 4-tier system since M1/M2, with
+`RISK_POLICY` semantics (`requiresApproval`/`requiresChairman`/
+`autoExecutableAfterApproval`) that already match the brief's own
+definitions verbatim — RED's `autoExecutableAfterApproval: false` is,
+word for word, the Constitution's own RED definition ("AI may prepare
+everything but cannot independently execute the action"). `SPEND_MONEY`
+is the only RED permission ever declared before M7, and per this
+history it has never been granted to any agent; `ACCESS_SECRET`/
+`MODIFY_CONFIGURATION` are ORANGE, also never granted. M7 is the first
+milestone to actually exercise ORANGE and RED in a live pipeline — no
+schema change, no change to `risk-level.ts`'s shape, only new entries
+in `PERMISSION_RISK_LEVEL` (#60).
+
+## 58. PLAN / APPROVE / EXECUTE — the mechanism M7's hardest actions actually need
+
+`agentRuntimeService.callTool` throws immediately whenever a tool's
+permission resolves to `REQUIRES_APPROVAL` — true for YELLOW, ORANGE,
+and RED alike (§3 audit finding, `docs/M7_ARCHITECTURE_PROPOSAL.md`).
+Unlike M6's WRITE_FILES/EXECUTE_CODE problem (#50), this can't be
+solved by adding a narrower GREEN permission — deploying to production
+and activating billing are genuinely RED-tier actions, not actions
+that only look dangerous because of an overly broad prior
+classification. The mechanism instead splits every above-GREEN action
+into three separable steps: PLAN (an agent, zero tool calls, produces
+an immutable row a *service* persists), APPROVE (the existing,
+unmodified `approvalService`, exactly as used since M1), and EXECUTE
+(a new, human-actor-only service method, never reachable from
+`agentRuntimeService`, that re-verifies the exact approved resource
+before calling a Provider). This is not a new invention — it is
+`messageApprovalService`'s own shape (M5), generalized by exactly one
+new step, because M5 never had a real external side effect to perform
+after approval (there was no send capability at all) and M7 does (a
+dev-fixture one). Guardian's own agent-permission system is never
+consulted for the EXECUTE step, deliberately: Guardian answers "may an
+AGENT do X," and a verified human exercising their own authority
+directly is a structurally different, already-precedented event
+(`productService.approve`, `productReviewMemoService.recordHumanDecision`,
+`messageApprovalService.applyDecision`/`.markContacted` all already
+work this way — `assertHumanActor`, not a Guardian grant, is the gate).
+
+## 59. Dev-fixture-only providers — no real Stripe/Vercel/etc. integration in M7
+
+Every M7 provider (`DeploymentProvider`/`BillingProvider`/
+`SecretProvider`/`AnalyticsProvider`/`MonitoringProvider`) has exactly
+one implementation: an in-memory, zero-network, `DEV_FIXTURE`-labeled
+class. Rejected: a real provider for at least deployment or billing,
+which the brief's own Provider-abstraction section allows ("at most
+one real provider only if justified"). Not justified here — a real
+provider means a real credential (a real secrets-management problem
+this milestone's actual job doesn't require taking on), a real
+internet-reachable webhook endpoint (a real adversarial-traffic
+attack surface on top of everything else M7 already has to ship
+safely), and an unverified dependency on this session's own proxied
+outbound network. Every provider factory
+(`src/providers/*-provider-factory.ts`) is a single seam, mirroring
+`createModelProvider()`'s own precedent (M2) — a real implementation
+is additive later, never a change to any calling code.
+
+## 60. New M7 permission classification, anchored to Constitution §8's own examples
+
+| Permission | Level | Constitution §8 anchor |
+|---|---|---|
+| `DEPLOY_PRODUCTION` | RED | Deliberately more conservative than the existing, untouched `DEPLOY_APPLICATION` (YELLOW, "major deployment") — a first-time production launch is closer to "substantial irreversible commitment" than a routine redeploy; Section 0 of the brief explicitly licenses this reading absent a narrower, Founder-approved mechanism. |
+| `CREATE_BILLING` | YELLOW | "significant pricing changes" / "external account creation" — no money moves yet. |
+| `ACTIVATE_BILLING` | RED | "major financial transfers" / "legally binding commitments" — the moment real payment collection becomes possible. |
+| `MODIFY_PRODUCTION` | RED | "high-impact actions with significant external consequences." |
+| `ACCESS_PRODUCTION_DATA` | ORANGE | Matches `ACCESS_SECRET`'s own existing ORANGE reasoning: a read is reversible by nature, unlike a mutation. |
+
+None of these is ever granted to any agent (`tests/integration/m7-security.test.ts`
+verifies this directly) — every M7 agent holds zero permissions,
+continuing M6's own established pattern. The table exists for
+`ApprovalRequest.riskLevel` values and CEO/Chairman reasoning
+references, never for a Guardian tool-call grant, since (#58) no
+agent tool call gated above GREEN could complete anyway.
+
+## 61. LaunchPlan has no independent status column — a refinement made during implementation
+
+The architecture proposal's own §16 sketch described `LaunchPlan` as
+carrying a `status` field. Building it, the ProductSpec/MvpArchitecture
+precedent (M6) turned out to apply exactly the same way: `LaunchPlan`
+is a plain historized roll-up row; `Product.status`
+(`LAUNCH_PLANNING`/`AWAITING_LAUNCH_APPROVAL`/...) carries the real
+state, and `LaunchReviewMemo.humanDecision` carries the actual
+approve/reject decision. Adding a third, redundant status field to
+`LaunchPlan` itself would only invite the two from drifting out of
+sync. The "smallest correct model" instruction the brief itself gives
+license for exactly this kind of during-implementation simplification.
+
+## 62. `requestApproval` takes an explicit `requestedByAgentId` parameter, not a stored FK
+
+Considered adding a `createdByAgentId` column to `DeploymentPlan`/
+`BillingPlan` so `requestApproval` could resolve the authoring agent
+itself. Reverted before migrating: `messageApprovalService.requestApproval`
+(M5) already takes `requestedByAgentId` as an explicit parameter
+rather than reading it off the row, and `ProductSpec` (M6) doesn't
+store a creating-agent FK either — the established precedent is that
+the *caller* (an orchestrator, an API route) supplies the correct
+agent id, not that every approvable row needs its own creator column.
+Matching precedent kept the schema smaller and avoided a
+speculative FK with no other reader.
+
+## 63. A failed EXECUTE reverts DEPLOYING to AWAITING_LAUNCH_APPROVAL, never straight to FAILED
+
+`Product.status` has no `DEPLOYING -> FAILED` transition. A
+`DeploymentProvider.deploy()` failure is treated the same way
+`docs/M6_ARCHITECTURE_PROPOSAL.md`'s own mechanical-vs-judgment split
+treats a mechanical fact: not a reason to declare the whole launch
+attempt dead, but a reason a human should try again. `DeploymentPlan.status`
+is never advanced past `HUMAN_APPROVED` on a failed attempt either —
+only a real, successful `Deployment` moves it to `EXECUTED` — so the
+exact same already-approved plan is what a retry re-executes, never a
+fresh approval request. There is still no automatic retry loop
+anywhere: every attempt, first or Nth, is its own fully
+human-triggered `deploymentService.execute` call.
+
+## 64. Real bugs this build caught before they shipped
+
+Continuing the M3/M5/M6 precedent (#37, #45, #56) of naming what
+verification actually found:
+
+- **A double-rollback crash**: `deploymentService.rollback` originally
+  checked only `deployment.status === "LIVE"` on the *original* row —
+  but that row's own status is deliberately never mutated (a rollback
+  is a new row, never an edit, #18's own discipline). Calling
+  `rollback` a second time against the same original `deploymentId`
+  therefore still read `LIVE`, proceeded, and tried to transition
+  `Product` `PAUSED -> PAUSED` — an illegal self-transition, thrown as
+  `InvalidTransitionError` instead of a clean, honest "already rolled
+  back" error. Caught by `tests/integration/m7-security.test.ts`'s own
+  double-rollback test; fixed by checking
+  `deploymentRepository.findRollbackOf(deployment.id)` explicitly
+  rather than trusting the stale status field.
+- **A test-harness gap, not an application bug**: `tests/setup.ts`'s
+  `resetDatabase()` didn't yet know about the twelve new M7 tables, so
+  the very first M7 test file to actually populate them failed the
+  *next* test's own `product.deleteMany()` with a real
+  `Foreign key constraint violated` — `Deployment.deploymentPlanId`/
+  `BillingAccount.billingPlanId`/`LaunchReviewMemo.launchPlanId` are
+  all deliberately `onDelete: Restrict` (the same "must never be
+  deleted out from under it" discipline `CustomerEvidence.evidenceId`
+  already uses), so Product's own cascade to `DeploymentPlan`/
+  `BillingPlan`/`LaunchPlan` correctly refused to proceed while
+  those Restrict-linked children still existed. Fixed by adding the
+  M7 tables to `resetDatabase()` in FK-safe order, mirroring the
+  file's own existing M3/M4/M5/M6 blocks exactly.

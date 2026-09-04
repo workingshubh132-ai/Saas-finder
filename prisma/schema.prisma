@@ -174,6 +174,10 @@ model ApprovalRequest {
   /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §13. One ApprovalRequest ever binds to one OutreachMessage (resourceType="OUTREACH_MESSAGE").
   outreachMessages OutreachMessage[]
 
+  /// M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §5-6, §17, §19. One ApprovalRequest ever binds to one exact DeploymentPlan/BillingPlan (resourceType="DEPLOYMENT_PLAN"/"BILLING_PLAN").
+  deploymentPlans DeploymentPlan[]
+  billingPlans    BillingPlan[]
+
   @@index([status])
   @@index([resourceType, resourceId])
   @@map("approval_requests")
@@ -568,6 +572,8 @@ model ChairmanReview {
   customerDiscoveryMemos CustomerDiscoveryMemo[]
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §33-34.
   productReviewMemos     ProductReviewMemo[]
+  /// M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §29, §31.
+  launchReviewMemos      LaunchReviewMemo[]
 
   @@index([opportunityId])
   @@map("chairman_reviews")
@@ -1009,6 +1015,8 @@ model CeoRecommendation {
   customerDiscoveryMemos CustomerDiscoveryMemo[]
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §32, §34.
   productReviewMemos     ProductReviewMemo[]
+  /// M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §28, §31.
+  launchReviewMemos      LaunchReviewMemo[]
 
   @@index([opportunityId])
   @@map("ceo_recommendations")
@@ -1509,6 +1517,17 @@ model Product {
   engineeringTasks   EngineeringTask[]
   productReviewMemos ProductReviewMemo[]
 
+  /// M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §16, §33.
+  launchPlans       LaunchPlan[]
+  deploymentPlans   DeploymentPlan[]
+  pricingModels     PricingModel[]
+  billingPlans      BillingPlan[]
+  goToMarketPlans   GoToMarketPlan[]
+  businessMetrics   BusinessMetric[]
+  incidents         Incident[]
+  supportCases      SupportCase[]
+  launchReviewMemos LaunchReviewMemo[]
+
   @@index([status])
   @@map("products")
 }
@@ -1803,4 +1822,361 @@ model ProductReviewMemo {
 
   @@index([productId])
   @@map("product_review_memos")
+}
+
+// ---------------------------------------------------------------------------
+// M7 — SaaS Launch & Operations Engine
+// (docs/M7_ARCHITECTURE_PROPOSAL.md)
+// ---------------------------------------------------------------------------
+
+/// A thin roll-up per launch attempt (§16, §31) — a plain historized
+/// data row, like MvpArchitecture: no independent status of its own.
+/// Product.status (LAUNCH_PLANNING/AWAITING_LAUNCH_APPROVAL/DEPLOYING/
+/// LIVE) carries the real state; LaunchReviewMemo.humanDecision carries
+/// the actual approve/reject decision — the same split ProductSpec/
+/// MvpArchitecture/ProductReviewMemo already use.
+model LaunchPlan {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  pricingModelId String?       @map("pricing_model_id")
+  pricingModel   PricingModel? @relation(fields: [pricingModelId], references: [id], onDelete: SetNull)
+
+  deploymentPlanId String?         @map("deployment_plan_id")
+  deploymentPlan   DeploymentPlan? @relation(fields: [deploymentPlanId], references: [id], onDelete: SetNull)
+
+  goToMarketPlanId String?         @map("go_to_market_plan_id")
+  goToMarketPlan   GoToMarketPlan? @relation(fields: [goToMarketPlanId], references: [id], onDelete: SetNull)
+
+  /// JSON-encoded compiled summary — assembled by launchStrategistService, zero new model calls.
+  summary String
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  launchReviewMemos LaunchReviewMemo[]
+
+  @@index([productId])
+  @@map("launch_plans")
+}
+
+/// Where a DeploymentPlan targets (§13) — a plain label; no real
+/// environment is ever provisioned. Immutable once created, mirroring
+/// OutreachMessage's own immutability discipline: a revised plan is a
+/// new row with a fresh id, requiring its own fresh approval.
+model DeploymentPlan {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  environment String
+  provider    String
+  strategy    String
+
+  /// Honestly labeled ESTIMATE (mirrors Product's own cost fields, §16).
+  estimatedCostUsd Float @map("estimated_cost_usd")
+
+  rollbackPlan String @map("rollback_plan")
+  artifactRef  String @map("artifact_ref")
+
+  /// True when checkLaunchBudget (§27) found this plan's estimated
+  /// monthly cost over the founder-configured ceiling — surfaced to
+  /// the CEO/Chairman, never silently hidden.
+  budgetExceeded Boolean @default(false) @map("budget_exceeded")
+
+  /// DRAFT -> PENDING_APPROVAL -> HUMAN_APPROVED -> EXECUTED / REJECTED (§16-17).
+  status String @default("DRAFT")
+
+  approvalRequestId String?          @map("approval_request_id")
+  approvalRequest   ApprovalRequest? @relation(fields: [approvalRequestId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  deployments Deployment[]
+  launchPlans LaunchPlan[]
+
+  @@index([productId])
+  @@index([status])
+  @@map("deployment_plans")
+}
+
+/// One row per actual EXECUTE/rollback attempt against a DeploymentPlan
+/// (§17-18) — created already in its terminal status (mirrors
+/// ToolExecution's own SUCCESS/FAILED-at-creation shape), never
+/// mutated afterward. A rollback is a NEW Deployment row with
+/// rolledBackFromId set, never an edit to the row being rolled back.
+model Deployment {
+  id String @id @default(cuid())
+
+  deploymentPlanId String         @map("deployment_plan_id")
+  deploymentPlan   DeploymentPlan @relation(fields: [deploymentPlanId], references: [id], onDelete: Restrict)
+
+  provider    String
+  environment String
+  status      String
+
+  providerRef String @map("provider_ref")
+  detail      String
+
+  /// Self-relation: set when this row records a rollback of an earlier Deployment (§18).
+  rolledBackFromId String?      @map("rolled_back_from_id")
+  rolledBackFrom   Deployment?  @relation("DeploymentRollback", fields: [rolledBackFromId], references: [id], onDelete: SetNull)
+  rollbacks        Deployment[] @relation("DeploymentRollback")
+
+  deployedByIdentityId String   @map("deployed_by_identity_id")
+  deployedAt           DateTime @map("deployed_at")
+
+  incidents Incident[]
+
+  @@index([deploymentPlanId])
+  @@index([status])
+  @@map("deployments")
+}
+
+/// The Pricing Agent's output (§21) — historized, like ProductSpec: a
+/// revised pricing proposal is a new row, never an edit.
+model PricingModel {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// JSON-encoded tier list ({name, monthlyPriceUsd, features}[]).
+  tiers String
+
+  /// JSON-encoded UnitEconomics (§21) — costPerCustomerUsd/grossMarginUsd/grossMarginPct/reasoning.
+  unitEconomics String @map("unit_economics")
+
+  /// JSON-encoded string[], enforced non-empty (mirrors ProductSpec's own grounding discipline).
+  groundedInClaimIds    String @map("grounded_in_claim_ids")
+  groundedInEvidenceIds String @map("grounded_in_evidence_ids")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  launchPlans  LaunchPlan[]
+  billingPlans BillingPlan[]
+
+  @@index([productId])
+  @@map("pricing_models")
+}
+
+/// BillingPlan lifecycle (§16, §19) — "the minimum correct state
+/// machine": no READY state distinct from DRAFT. HUMAN_APPROVED never
+/// advances automatically on a failed ACTIVATE_BILLING attempt (§39)
+/// — only a real, successful BillingAccount moves it to ACTIVE.
+model BillingPlan {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  pricingModelId String       @map("pricing_model_id")
+  pricingModel   PricingModel @relation(fields: [pricingModelId], references: [id], onDelete: Restrict)
+
+  provider String
+
+  /// DRAFT -> HUMAN_APPROVED -> ACTIVE -> SUSPENDED -> CANCELLED / REJECTED.
+  status String @default("DRAFT")
+
+  approvalRequestId String?          @map("approval_request_id")
+  approvalRequest   ApprovalRequest? @relation(fields: [approvalRequestId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  billingAccounts BillingAccount[]
+
+  @@index([productId])
+  @@index([status])
+  @@map("billing_plans")
+}
+
+/// Created only by the ACTIVATE_BILLING EXECUTE step (§19) — the real
+/// (fixture-scoped) counterpart to an ACTIVE BillingPlan. A
+/// subscription fixture created against it (the billing capstone,
+/// §40.4) is a separate, explicit act, never implied by ACTIVE alone.
+model BillingAccount {
+  id String @id @default(cuid())
+
+  billingPlanId String      @map("billing_plan_id")
+  billingPlan   BillingPlan @relation(fields: [billingPlanId], references: [id], onDelete: Restrict)
+
+  provider           String
+  providerProductRef String @map("provider_product_ref")
+  providerPriceRef   String @map("provider_price_ref")
+  status             String @default("ACTIVE")
+
+  /// Per-account webhook signing secret (§10, §20) — a DEV_FIXTURE value only in M7, never a real credential.
+  webhookSecret String @map("webhook_secret")
+
+  activatedByIdentityId String   @map("activated_by_identity_id")
+  activatedAt           DateTime @map("activated_at")
+
+  webhookDeliveries WebhookDelivery[]
+
+  @@index([billingPlanId])
+  @@map("billing_accounts")
+}
+
+/// Idempotency + replay-protection record for every inbound billing
+/// webhook (§20) — a delivery id is unique per provider; a second
+/// delivery of the same id is rejected outright, never reprocessed.
+model WebhookDelivery {
+  id String @id @default(cuid())
+
+  billingAccountId String         @map("billing_account_id")
+  billingAccount   BillingAccount @relation(fields: [billingAccountId], references: [id], onDelete: Cascade)
+
+  provider   String
+  deliveryId String @map("delivery_id")
+
+  signatureValid Boolean @map("signature_valid")
+  eventType      String  @map("event_type")
+
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  @@unique([provider, deliveryId])
+  @@index([billingAccountId])
+  @@map("webhook_deliveries")
+}
+
+/// The GTM Agent's output (§22) — historized, like MvpArchitecture. No
+/// status of its own — a plan artifact, never itself approved or
+/// executed; no code path anywhere publishes it or sends anything.
+model GoToMarketPlan {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// JSON-encoded channel list ({channel, reasoning}[]).
+  channels String
+
+  /// JSON-encoded landing-page SPEC (sections/copy points) — never an actual deploy/publish.
+  landingPageSpec String @map("landing_page_spec")
+
+  /// JSON-encoded acquisition-EXPERIMENT specs — never a real campaign.
+  experiments String
+
+  groundedInClaimIds String @map("grounded_in_claim_ids")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  launchPlans LaunchPlan[]
+
+  @@index([productId])
+  @@map("go_to_market_plans")
+}
+
+/// The structural "observed vs. estimated" enforcement Section 45 of
+/// the M7 brief demands (§16, §23): valueKind is a real column, never
+/// a prose label — an aggregate that silently blends OBSERVED and
+/// ESTIMATED numbers is exactly the "fake business" failure mode this
+/// exists to prevent.
+model BusinessMetric {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  metricType String @map("metric_type")
+
+  /// OBSERVED | ESTIMATED — never optional, never inferred after the fact.
+  valueKind String @map("value_kind")
+  value     Float
+  /// Where this value actually came from: DEV_FIXTURE | MANUAL_ENTRY | COMPUTED_ESTIMATE.
+  source    String
+
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  @@index([productId])
+  @@index([productId, metricType])
+  @@map("business_metrics")
+}
+
+/// Incident lifecycle (§16, §26). Created by a human directly or by a
+/// failed/unhealthy MonitoringProvider.checkHealth result surfaced
+/// through the API — never auto-created silently in the background
+/// (no scheduler exists anywhere in this codebase).
+model Incident {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  deploymentId String?     @map("deployment_id")
+  deployment   Deployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+
+  severity String
+  status   String @default("DETECTED")
+
+  summary    String
+  postmortem String?
+
+  detectedAt DateTime  @default(now()) @map("detected_at")
+  resolvedAt DateTime? @map("resolved_at")
+
+  @@index([productId])
+  @@index([status])
+  @@map("incidents")
+}
+
+/// Support case lifecycle (§16, §25). customerRef/requestText are
+/// human-pasted labels, never scraped or enriched — same privacy
+/// boundary as CustomerResponse.rawContent (M5, §36).
+model SupportCase {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  customerRef String @map("customer_ref")
+  requestText String @map("request_text")
+
+  status String @default("OPEN")
+
+  /// The Support Agent's own judgment (§25) — never mutates status itself.
+  triageRecommendation String? @map("triage_recommendation")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([productId])
+  @@index([status])
+  @@map("support_cases")
+}
+
+/// Compiled with zero new model calls (§31), mirrors ProductReviewMemo exactly.
+model LaunchReviewMemo {
+  id String @id @default(cuid())
+
+  productId String  @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  launchPlanId String     @map("launch_plan_id")
+  launchPlan   LaunchPlan @relation(fields: [launchPlanId], references: [id], onDelete: Restrict)
+
+  ceoRecommendationId String            @map("ceo_recommendation_id")
+  ceoRecommendation   CeoRecommendation @relation(fields: [ceoRecommendationId], references: [id], onDelete: Restrict)
+
+  chairmanReviewId String         @map("chairman_review_id")
+  chairmanReview   ChairmanReview @relation(fields: [chairmanReviewId], references: [id], onDelete: Restrict)
+
+  /// JSON-encoded full structured memo body.
+  content String
+
+  recommendation String
+  confidence     Float
+
+  /// One of LAUNCH_REVIEW_HUMAN_DECISIONS; null until the Human Owner decides.
+  humanDecision       String?   @map("human_decision")
+  humanReason         String?   @map("human_reason")
+  decidedAt           DateTime? @map("decided_at")
+  decidedByIdentityId String?   @map("decided_by_identity_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([productId])
+  @@map("launch_review_memos")
 }

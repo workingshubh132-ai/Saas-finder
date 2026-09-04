@@ -39,6 +39,26 @@ async function resetDatabase(): Promise<void> {
   await prisma.mvpArchitecture.deleteMany();
   await prisma.feature.deleteMany();
   await prisma.productSpec.deleteMany();
+  // M7 leaf tables first (FK-safe order — docs/M7_ARCHITECTURE_PROPOSAL.md
+  // §33): launchReviewMemo references launchPlan/ceoRecommendation/
+  // chairmanReview (all Restrict) so it precedes all three; deployment
+  // references deploymentPlan (Restrict) so it precedes it; billingAccount
+  // references billingPlan (Restrict) so it precedes it; billingPlan
+  // references pricingModel (Restrict) so it precedes it. Everything else
+  // below is Cascade/SetNull from product, so order among them doesn't
+  // matter — grouped here only for readability.
+  await prisma.webhookDelivery.deleteMany();
+  await prisma.launchReviewMemo.deleteMany();
+  await prisma.incident.deleteMany();
+  await prisma.deployment.deleteMany();
+  await prisma.billingAccount.deleteMany();
+  await prisma.deploymentPlan.deleteMany();
+  await prisma.billingPlan.deleteMany();
+  await prisma.launchPlan.deleteMany();
+  await prisma.pricingModel.deleteMany();
+  await prisma.goToMarketPlan.deleteMany();
+  await prisma.businessMetric.deleteMany();
+  await prisma.supportCase.deleteMany();
   await prisma.product.deleteMany();
   // M5 leaf tables first (FK-safe order — docs/M5_ARCHITECTURE_PROPOSAL.md §22):
   // customerDiscoveryMemo references outreachExperiment/ceoRecommendation/

@@ -3,9 +3,20 @@ import { agentExecutionsRouter } from "./routes/agent-executions.routes.js";
 import { agentsRouter } from "./routes/agents.routes.js";
 import { auditRouter } from "./routes/audit.routes.js";
 import { authorizeRouter } from "./routes/authorize.routes.js";
+import { billingAccountsRouter } from "./routes/billing-accounts.routes.js";
+import { billingPlansRouter } from "./routes/billing-plans.routes.js";
+import { billingWebhooksRouter } from "./routes/billing-webhooks.routes.js";
+import { businessMetricsRouter } from "./routes/business-metrics.routes.js";
 import { ceoRecommendationsRouter } from "./routes/ceo-recommendations.routes.js";
 import { claimsRouter } from "./routes/claims.routes.js";
 import { competitorsRouter } from "./routes/competitors.routes.js";
+import { deploymentPlansRouter } from "./routes/deployment-plans.routes.js";
+import { deploymentsRouter } from "./routes/deployments.routes.js";
+import { goToMarketPlansRouter } from "./routes/go-to-market-plans.routes.js";
+import { incidentsRouter } from "./routes/incidents.routes.js";
+import { launchReviewMemosRouter } from "./routes/launch-review-memos.routes.js";
+import { pricingModelsRouter } from "./routes/pricing-models.routes.js";
+import { supportCasesRouter } from "./routes/support-cases.routes.js";
 import { customerDiscoveryMemosRouter } from "./routes/customer-discovery-memos.routes.js";
 import { customerResponsesRouter } from "./routes/customer-responses.routes.js";
 import { decisionCyclesRouter } from "./routes/decision-cycles.routes.js";
@@ -35,6 +46,13 @@ import { errorHandler } from "./middleware/error-handler.js";
 
 export function createApp(): Express {
   const app = express();
+
+  // M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §20, §34: the webhook route
+  // needs the RAW request bytes for HMAC signature verification, so it
+  // is mounted with express.raw() ahead of the global express.json()
+  // below — Express applies path-scoped middleware in mount order, so
+  // this path never reaches the JSON parser.
+  app.use("/api/billing-webhooks", express.raw({ type: "application/json" }), billingWebhooksRouter);
   app.use(express.json());
 
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
@@ -75,6 +93,17 @@ export function createApp(): Express {
   app.use("/api/products", productsRouter);
   app.use("/api/engineering-tasks", engineeringTasksRouter);
   app.use("/api/product-review-memos", productReviewMemosRouter);
+  // M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §34 (billing-webhooks mounted above, ahead of express.json()).
+  app.use("/api/deployment-plans", deploymentPlansRouter);
+  app.use("/api/deployments", deploymentsRouter);
+  app.use("/api/pricing-models", pricingModelsRouter);
+  app.use("/api/billing-plans", billingPlansRouter);
+  app.use("/api/billing-accounts", billingAccountsRouter);
+  app.use("/api/go-to-market-plans", goToMarketPlansRouter);
+  app.use("/api/business-metrics", businessMetricsRouter);
+  app.use("/api/incidents", incidentsRouter);
+  app.use("/api/support-cases", supportCasesRouter);
+  app.use("/api/launch-review-memos", launchReviewMemosRouter);
 
   app.use(errorHandler);
 

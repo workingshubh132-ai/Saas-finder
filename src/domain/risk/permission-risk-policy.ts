@@ -48,6 +48,16 @@ export const PERMISSION_RISK_LEVEL: Readonly<Record<Permission, RiskLevel>> = {
   // "major financial transfers". M2 may tier this by amount; M1 keeps
   // it conservative and uniform (Constitution §21, Capital Discipline).
   SPEND_MONEY: "RED",
+
+  // M7 (docs/M7_ARCHITECTURE_PROPOSAL.md §30) — classified against
+  // Constitution §8's own examples, never vibes. None of these is ever
+  // granted to any agent (§30's own table); classification exists for
+  // ApprovalRequest.riskLevel values and CEO/Chairman reasoning only.
+  CREATE_BILLING: "YELLOW", // "significant pricing changes" / "external account creation" — no money moves yet.
+  ACCESS_PRODUCTION_DATA: "ORANGE", // matches ACCESS_SECRET: a read is reversible by nature, unlike a mutation.
+  DEPLOY_PRODUCTION: "RED", // deliberately more conservative than DEPLOY_APPLICATION (YELLOW): first-time production launch is closer to "substantial irreversible commitment" than a routine redeploy.
+  ACTIVATE_BILLING: "RED", // "major financial transfers" / "legally binding commitments" — the moment real payment collection becomes possible.
+  MODIFY_PRODUCTION: "RED", // "high-impact actions with significant external consequences" — mutating a LIVE product's own infrastructure/configuration.
 };
 
 export function getPermissionRiskLevel(permission: Permission): RiskLevel {

@@ -1159,3 +1159,161 @@ already-installed `express`/`zod`/`@prisma/client`/`vitest`/`typescript`.
 `npm audit --omit=dev` reports the same **3 pre-existing moderate**
 `qs` advisories M5 already documented (reached transitively via
 `body-parser`/`express`) — unchanged by M6, not newly introduced.
+
+## M7 — SaaS Launch & Operations Engine
+
+Full architecture in `docs/M7_ARCHITECTURE_PROPOSAL.md`; the pipeline
+and lifecycle are in `docs/LAUNCH_OPERATIONS.md`. This section
+addresses the brief's own 20-item threat-review checklist directly,
+one item at a time, each tied to a concrete mechanism and a real test
+— not a documentation claim.
+
+### The core containment boundary: PLAN / APPROVE / EXECUTE
+
+No M7 agent ever holds a permission above GREEN — `DEPLOY_PRODUCTION`/
+`ACTIVATE_BILLING`/`MODIFY_PRODUCTION`/`ACCESS_PRODUCTION_DATA`/
+`CREATE_BILLING` are declared for classification only
+(`docs/DECISIONS.md` #60) and are never granted to any agent
+(`tests/integration/m7-security.test.ts`'s own least-privilege sweep).
+Every action those permissions name is split into PLAN (an agent, zero
+tool calls) → APPROVE (the unmodified `approvalService`) → EXECUTE (a
+new, `assertHumanActor`-gated service method, never reachable from
+`agentRuntimeService`) — see `docs/DECISIONS.md` #58 for the full
+rationale. This is the single mechanism nearly every item below reduces
+to.
+
+### The 20-category threat review
+
+1. **Credential theft** — no real credential exists anywhere in M7;
+   every provider is `DEV_FIXTURE`-only (`docs/DECISIONS.md` #59).
+2. **Secret leakage** — `DevSecretProvider` stores only fixture
+   values; no tool anywhere exposes `process.env`; a `BillingAccount`'s
+   own webhook secret (`node:crypto` `randomBytes(32)`) is generated
+   server-side and never returned by any read endpoint that echoes it
+   back in cleartext beyond the one activation response the human who
+   just triggered activation already sees.
+3. **Production access** — `assertHumanActor` blocks every EXECUTE
+   step for an AGENT actor, verified directly
+   (`tests/integration/m7-security.test.ts`).
+4. **Deployment abuse** — exact-action approval binding
+   (`deploymentService.execute` re-verifies `approvalRequest.resourceId
+   === plan.id` before doing anything); a DeploymentPlan cannot be
+   executed twice (`DeploymentPlan.status` only advances to `EXECUTED`
+   on real success); `DevDeploymentProvider` cannot reach anything
+   real.
+5. **Supply-chain attacks** — zero new npm dependencies
+   (`git diff HEAD -- package.json package-lock.json` empty for this
+   milestone's own commits).
+6. **Dependency attacks** — no real provider SDK is added; M6's own
+   `checkDependencies()` is unchanged and still applies to anything the
+   Engineering Agent touches.
+7. **Billing abuse** — `ACTIVATE_BILLING` is RED, human-execute-only,
+   exact-action bound; `DevBillingProvider` moves no real money and
+   enforces its own referential integrity (`createSubscription` refuses
+   a customer/price ref it never itself created).
+8. **Financial loss** — impossible by construction: no real payment
+   processor is ever called.
+9. **SSRF** — every dev provider makes zero outbound network calls; the
+   one real inbound surface (the webhook route) never triggers an
+   outbound fetch from untrusted input.
+10. **Privilege escalation** — Guardian's own agent-permission model is
+    unchanged; an agent identity cannot satisfy `assertHumanActor` by
+    construction (`identity.type` is set at creation, never mutated by
+    any API).
+11. **IDOR** — every EXECUTE/decision endpoint re-verifies the exact
+    resource id bound to its `ApprovalRequest` server-side, never
+    trusting a client-supplied id pairing; a stray `ApprovalRequest`
+    bound to the wrong resource type is rejected
+    (`tests/integration/m7-security.test.ts`).
+12. **Data leakage** — `BusinessMetric.valueKind`/`.source` prevent an
+    estimated number from being reported as observed fact.
+13. **Customer-data exposure** — `SupportCase.customerRef`/`.requestText`
+    are human-pasted labels only, the same privacy boundary M5
+    established for `Prospect`/`CustomerResponse` — no connector, no
+    enrichment.
+14. **Prompt injection** — the Support Agent's system prompt explicitly
+    labels the customer's own request text as untrusted, external data
+    and instructs the model never to follow instruction-like content
+    inside it, the same discipline `chairman.service.ts` already
+    applies to CEO-recommendation text and customer-response text.
+15. **Malicious support tickets** — the Support Agent holds zero tool
+    calls and zero permissions; its `triageRecommendation` is judgment
+    text a human reads, never code that executes or a status it can
+    mutate itself.
+16. **Malicious analytics input** — `AnalyticsProvider.track` is never
+    called with unvalidated external input in M7; a real analytics
+    ingestion endpoint is explicitly deferred
+    (`docs/M7_ARCHITECTURE_PROPOSAL.md` §45).
+17. **Webhook forgery** — `POST /api/billing-webhooks/dev-fixture`
+    enforces, in order: source validation (unknown provider/account
+    rejected before a signature is even checked), HMAC-SHA256 signature
+    verification (`src/domain/webhook/webhook-security.ts`, constant-time
+    comparison), a 5-minute replay window, and delivery-id idempotency
+    (`WebhookDelivery`, unique per provider) — every branch, accepted or
+    rejected, calls `auditService.record`. Directly tested, including a
+    tampered signature and a replayed delivery, in
+    `tests/integration/m7-capstone-billing.test.ts`.
+18. **Rollback abuse** — `assertHumanActor`-gated, no fresh
+    `ApprovalRequest` by design (§18 of the architecture proposal); a
+    non-LIVE `Deployment` cannot be rolled back, and — a real bug this
+    build caught and fixed, `docs/DECISIONS.md` #64 — the same
+    `Deployment` row cannot be rolled back twice.
+19. **Audit manipulation** — every new mutating operation uses the
+    existing, unmodified `auditService.record`; no new audit mechanism,
+    no new bypass surface.
+20. **Cost runaway** — `checkLaunchBudget()` forces `DeploymentPlan.budgetExceeded`
+    visibility before any approval can be requested; no EXECUTE step
+    ever auto-retries (a failed attempt requires a fresh, fully
+    human-triggered call, `docs/DECISIONS.md` #63).
+
+### Webhook route mounting — raw body ahead of the JSON parser
+
+`POST /api/billing-webhooks/dev-fixture` is mounted with `express.raw({
+type: "application/json" })` *before* the app's global `express.json()`
+in `src/api/app.ts` — Express applies path-scoped middleware in mount
+order, so this path never reaches the JSON body parser and the exact
+raw bytes are available for HMAC verification. Getting this ordering
+wrong (mounting the raw parser after the global JSON one, or omitting
+the path scope) would silently break signature verification for every
+real delivery while still passing a naive test that JSON-encodes and
+re-stringifies the same object — `tests/integration/m7-capstone-billing.test.ts`
+signs the literal string it sends, not a re-serialized copy, so a
+regression here would fail loudly.
+
+### Agent permissions, reaffirmed for the four new M7 agents
+
+Launch Strategist, Pricing Agent, GTM Agent, and Support Agent all
+hold **zero** Guardian permission grants — every M7 agent only ever
+PLANS (`docs/M7_ARCHITECTURE_PROPOSAL.md` §5), and no permission above
+GREEN could complete inside `agentRuntimeService.run()` regardless
+(§3 of the same document). Verified directly, not just asserted, by
+`tests/integration/m7-security.test.ts`'s least-privilege sweep across
+every agent `makeFullAgentSet()` produces.
+
+### Verification table — every claim above has a passing test
+
+| Claim | Test |
+| --- | --- |
+| No M7 agent holds any above-GREEN permission | `tests/integration/m7-security.test.ts` |
+| EXECUTE steps reject a non-HUMAN actor (deploy, rollback, activate) | `tests/integration/m7-security.test.ts` |
+| Exact-action approval binding; a mis-bound ApprovalRequest is refused | `tests/integration/m7-security.test.ts` |
+| A DeploymentPlan cannot be executed twice | `tests/integration/m7-security.test.ts` |
+| A Deployment cannot be rolled back twice / while not LIVE | `tests/integration/m7-security.test.ts` |
+| Self-approval is impossible for M7's own RED approvals | `tests/integration/m7-security.test.ts` |
+| Webhook signature verification, replay window, idempotency, source validation | `tests/unit/m7-domain.test.ts`, `tests/integration/m7-capstone-billing.test.ts` |
+| A failed EXECUTE reverts cleanly and is safely re-executable, no silent loop | `tests/integration/m7-failure-handling.test.ts` |
+| Cost-exceeds-budget blocks launch end-to-end (Chairman objects, CEO REDUCE_COST, human DELAY) | `tests/integration/m7-capstone-negative.test.ts` |
+| A security FAIL survives an earlier human override and still blocks launch | `tests/integration/m7-capstone-negative.test.ts` |
+| Business metrics are structurally labeled OBSERVED/ESTIMATED with a real source | `tests/integration/m7-capstone-positive.test.ts`, `tests/integration/m7-capstone-billing.test.ts` |
+| The full positive path reaches LIVE only through PLAN -> APPROVE -> EXECUTE | `tests/integration/m7-capstone-positive.test.ts` |
+| No autonomous deployment or billing activation | `deploymentService`/`billingActivationService` both `assertHumanActor`-gated; no route anywhere calls either without it |
+
+### Dependency posture (M7)
+
+**Zero new production dependencies** — confirmed by `git diff HEAD --
+package.json package-lock.json` showing no change anywhere in this
+milestone's work; every M7 capability reuses VentureForge's own
+already-installed `express`/`zod`/`@prisma/client`/`vitest`/`typescript`
+plus Node's own built-in `node:crypto`. `npm audit --omit=dev` reports
+the same pre-existing advisories prior milestones already documented —
+unchanged by M7, not newly introduced.

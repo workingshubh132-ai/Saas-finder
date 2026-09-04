@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { z } from "zod";
 import { engineeringTaskRepository } from "../../db/repositories/engineering-task.repository.js";
+import { launchPlanRepository } from "../../db/repositories/launch-plan.repository.js";
+import { launchReviewMemoRepository } from "../../db/repositories/launch-review-memo.repository.js";
 import { mvpArchitectureRepository } from "../../db/repositories/mvp-architecture.repository.js";
 import { productReviewMemoRepository } from "../../db/repositories/product-review-memo.repository.js";
 import { productSpecRepository } from "../../db/repositories/product-spec.repository.js";
+import { launchOperationsService } from "../../services/launch-operations.service.js";
 import { productFactoryService } from "../../services/product-factory.service.js";
 import { productService } from "../../services/product.service.js";
 import { asyncHandler } from "../middleware/async-handler.js";
@@ -111,6 +114,48 @@ productsRouter.post(
   asyncHandler(async (req, res) => {
     const body = req.body as z.infer<typeof buildProductSchema>;
     const summary = await productFactoryService.build({ productId: requireParam(req, "id"), ...body, startedBy: getActor(req) });
+    res.status(201).json(summary);
+  }),
+);
+
+productsRouter.get(
+  "/:id/launch-plans",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await launchPlanRepository.findLatestForProduct(requireParam(req, "id")));
+  }),
+);
+
+productsRouter.get(
+  "/:id/launch-review-memos",
+  requireAuth(),
+  asyncHandler(async (req, res) => {
+    res.json(await launchReviewMemoRepository.findLatestForProduct(requireParam(req, "id")));
+  }),
+);
+
+const planLaunchSchema = z.object({
+  launchStrategistAgentId: z.string().min(1),
+  pricingAgentId: z.string().min(1),
+  gtmAgentId: z.string().min(1),
+  ceoAgentId: z.string().min(1),
+});
+
+/**
+ * The launch-planning pipeline, over HTTP
+ * (docs/M7_ARCHITECTURE_PROPOSAL.md §5, §17, §28-31) — runs a
+ * READY_FOR_DEPLOYMENT Product all the way to a compiled
+ * LaunchReviewMemo in AWAITING_LAUNCH_APPROVAL, mirroring POST
+ * /:id/build's own precedent: Human-Owner-only to start, PLANNING
+ * only — never a deployment, billing activation, or spend.
+ */
+productsRouter.post(
+  "/:id/plan-launch",
+  requireHuman(),
+  validateBody(planLaunchSchema),
+  asyncHandler(async (req, res) => {
+    const body = req.body as z.infer<typeof planLaunchSchema>;
+    const summary = await launchOperationsService.planLaunch({ productId: requireParam(req, "id"), ...body, startedBy: getActor(req) });
     res.status(201).json(summary);
   }),
 );

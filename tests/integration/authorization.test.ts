@@ -99,3 +99,29 @@ describe("authorizationService.authorize", () => {
     ).rejects.toThrow(ValidationError);
   });
 });
+
+/**
+ * A real grant test per new M7 permission (docs/M7_ARCHITECTURE_PROPOSAL.md
+ * §2, §30) — the exact bug class docs/DECISIONS.md #56 caught once
+ * already for M6's own two new permissions (a migration that widens
+ * three tables' CHECK constraints but misses a fourth fails silently
+ * until the first real grant). Every value here must round-trip
+ * through the real `agent_permissions.permission` CHECK constraint.
+ */
+describe("authorizationService.authorize — M7 permissions", () => {
+  it.each([
+    ["DEPLOY_PRODUCTION", "RED"],
+    ["CREATE_BILLING", "YELLOW"],
+    ["ACTIVATE_BILLING", "RED"],
+    ["MODIFY_PRODUCTION", "RED"],
+    ["ACCESS_PRODUCTION_DATA", "ORANGE"],
+  ] as const)("grants %s and resolves it to %s, requiring approval", async (permission, riskLevel) => {
+    const agent = await makeAgent();
+    await agentService.grantPermission({ agentId: agent.id, permission, grantedBy: HUMAN_OWNER });
+
+    const decision = await authorizationService.authorize({ agentId: agent.id, action: permission });
+
+    expect(decision.decision).toBe("REQUIRES_APPROVAL");
+    expect(decision.riskLevel).toBe(riskLevel);
+  });
+});

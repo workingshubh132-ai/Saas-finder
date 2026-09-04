@@ -4,9 +4,13 @@ import { ceoRecommendationRepository } from "../db/repositories/ceo-recommendati
 import { claimRepository } from "../db/repositories/claim.repository.js";
 import { codeReviewRepository } from "../db/repositories/code-review.repository.js";
 import { customerResponseRepository } from "../db/repositories/customer-response.repository.js";
+import { deploymentPlanRepository } from "../db/repositories/deployment-plan.repository.js";
 import { engineeringTaskRepository } from "../db/repositories/engineering-task.repository.js";
+import { goToMarketPlanRepository } from "../db/repositories/go-to-market-plan.repository.js";
+import { launchPlanRepository } from "../db/repositories/launch-plan.repository.js";
 import { outreachExperimentRepository } from "../db/repositories/outreach-experiment.repository.js";
 import { opportunityRepository } from "../db/repositories/opportunity.repository.js";
+import { pricingModelRepository } from "../db/repositories/pricing-model.repository.js";
 import { productRepository } from "../db/repositories/product.repository.js";
 import { productSpecRepository } from "../db/repositories/product-spec.repository.js";
 import { prospectRepository } from "../db/repositories/prospect.repository.js";
@@ -16,8 +20,10 @@ import { validationReportRepository } from "../db/repositories/validation-report
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
 import { CEO_DECISION_ACTIONS } from "../domain/decision/decision-action.types.js";
 import { CUSTOMER_DISCOVERY_ACTIONS } from "../domain/decision/customer-discovery-action.types.js";
+import { LAUNCH_OPERATIONS_ACTIONS } from "../domain/decision/launch-operations-action.types.js";
 import { PRODUCT_BUILD_ACTIONS } from "../domain/decision/product-build-action.types.js";
 import { computeDecisionPriority, PLACEHOLDER_NEUTRAL_SCORE } from "../domain/decision/priority.js";
+import type { UnitEconomics } from "../domain/pricing-model/unit-economics.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString, toJsonString } from "../domain/shared/json.js";
 import { agentRuntimeService, type ExecutionBudget, type RunOutcome } from "./agent-runtime.service.js";
@@ -290,6 +296,100 @@ function buildDevCustomerDiscoveryFixture(
     citedClaimIds: [fallbackClaimId],
     targetClaimId: null,
     confidence: 0.3,
+  };
+}
+
+const launchOperationsDecisionSchema = z.object({
+  action: z.enum(LAUNCH_OPERATIONS_ACTIONS),
+  reasoning: z.string().min(1),
+  citedClaimIds: z.array(z.string().min(1)).min(1),
+  confidence: z.number().min(0).max(1),
+});
+type LaunchOperationsDecision = z.infer<typeof launchOperationsDecisionSchema>;
+
+interface LaunchPlanSummary {
+  environment: string;
+  budgetExceeded: boolean;
+  estimatedCostUsd: number;
+  grossMarginPct: number | null;
+  groundedClaimCount: number;
+}
+
+const CEO_LAUNCH_OPERATIONS_SYSTEM_PROMPT =
+  "You are the CEO of VentureForge, now deciding a launch & operations step (docs/M7_ARCHITECTURE_PROPOSAL.md §28). " +
+  "This is a FOURTH, distinct question from your usual opportunity-kill, customer-discovery, or product-build " +
+  "decisions: given a product that is ready to launch (its deployment plan, pricing model, and go-to-market plan), " +
+  "decide what should happen next. You have no tools and cannot deploy, bill, or spend anything yourself — every " +
+  "input is already-established fact. Choose exactly one action: LAUNCH (deployment plan, pricing, and GTM are all " +
+  "genuinely ready and within budget — recommend a real human go/no-go decision now); DELAY_LAUNCH (something " +
+  "specific is not ready yet, but no fundamental problem exists); REDUCE_COST (the deployment plan's own estimated " +
+  "cost exceeds the founder's budget ceiling — this must be resolved before launch); CHANGE_PRICING (unit " +
+  "economics are too thin — gross margin is too low to sustain the business); RUN_ACQUISITION_EXPERIMENT (the GTM " +
+  "plan's own experiment is worth running before a full launch); REQUEST_CUSTOMER_RESEARCH (the pricing or GTM " +
+  "plan is grounded in too few real claims to trust); IMPROVE_PRODUCT (a live product's own metrics suggest the " +
+  "product itself needs work before continuing); PAUSE_PRODUCT (a live product should be temporarily paused); " +
+  "KILL_PRODUCT (a fundamental problem means this product should not continue); or REQUEST_HUMAN_REVIEW (you " +
+  "cannot confidently resolve this yourself — an honest, valid outcome). Every recommendation MUST cite the " +
+  "specific claim ids that ground the pricing/GTM plan. " +
+  'Respond with ONLY JSON matching: {"action": "LAUNCH"|"DELAY_LAUNCH"|"REDUCE_COST"|"CHANGE_PRICING"|' +
+  '"RUN_ACQUISITION_EXPERIMENT"|"REQUEST_CUSTOMER_RESEARCH"|"IMPROVE_PRODUCT"|"PAUSE_PRODUCT"|"KILL_PRODUCT"|' +
+  '"REQUEST_HUMAN_REVIEW", "reasoning": string, "citedClaimIds": string[], "confidence": number}';
+
+function buildLaunchOperationsPrompt(summary: LaunchPlanSummary, groundedClaims: readonly Claim[]): string {
+  const claimLines = groundedClaims.map((c) => `- [id=${c.id}] [${c.claimType}] status=${c.status} confidence=${c.confidence.toFixed(2)}: ${c.statement}`);
+  return [
+    `Deployment environment: ${summary.environment}`,
+    `Estimated monthly cost: $${summary.estimatedCostUsd.toFixed(2)}`,
+    `Budget exceeded: ${summary.budgetExceeded}`,
+    `Gross margin: ${summary.grossMarginPct === null ? "not yet computed (no pricing model)" : `${(summary.grossMarginPct * 100).toFixed(1)}%`}`,
+    `Grounded in ${summary.groundedClaimCount} real claim(s).`,
+    "",
+    `Grounding claims:`,
+    ...(claimLines.length > 0 ? claimLines : ["(none)"]),
+  ].join("\n");
+}
+
+/**
+ * DEVELOPMENT ONLY — deterministic, rule-based, derived from the
+ * launch plan's own real budget/margin/grounding facts, same
+ * discipline as buildDevProductBuildFixture.
+ */
+function buildDevLaunchOperationsFixture(summary: LaunchPlanSummary, groundedClaims: readonly Claim[]): LaunchOperationsDecision {
+  const citedClaimIds = groundedClaims.map((c) => c.id);
+  if (citedClaimIds.length === 0) {
+    throw new ValidationError("Cannot produce a launch-operations recommendation with no grounding claims.");
+  }
+
+  if (summary.budgetExceeded) {
+    return {
+      action: "REDUCE_COST",
+      reasoning: `[DEV FIXTURE] Estimated monthly cost $${summary.estimatedCostUsd.toFixed(2)} exceeds the founder-configured budget ceiling — this must be resolved before a human can responsibly approve launch.`,
+      citedClaimIds,
+      confidence: 0.75,
+    };
+  }
+  if (summary.grossMarginPct !== null && summary.grossMarginPct < 0.2) {
+    return {
+      action: "CHANGE_PRICING",
+      reasoning: `[DEV FIXTURE] Gross margin ${(summary.grossMarginPct * 100).toFixed(1)}% is too thin to sustain the business at the proposed price point.`,
+      citedClaimIds,
+      confidence: 0.6,
+    };
+  }
+  if (summary.groundedClaimCount < 2) {
+    return {
+      action: "REQUEST_CUSTOMER_RESEARCH",
+      reasoning: `[DEV FIXTURE] The pricing/GTM plan is grounded in only ${summary.groundedClaimCount} real claim(s) — too thin to trust for a real launch decision.`,
+      citedClaimIds,
+      confidence: 0.5,
+    };
+  }
+
+  return {
+    action: "LAUNCH",
+    reasoning: `[DEV FIXTURE] Deployment plan is within budget, gross margin ${summary.grossMarginPct === null ? "is unavailable but no red flag exists" : `is ${(summary.grossMarginPct * 100).toFixed(1)}%`}, and the plan is grounded in ${summary.groundedClaimCount} real claim(s) — ready for a real human go/no-go decision.`,
+    citedClaimIds,
+    confidence: 0.7,
   };
 }
 
@@ -738,6 +838,116 @@ export const ceoReasoningService = {
           resourceId: params.productId,
           result: "SUCCESS",
           metadata: { recommendationId: recommendation.id, confidence: decision.confidence, ...outcome },
+        });
+        await eventBus.publish({
+          type: "CEO_RECOMMENDATION_ISSUED",
+          payload: { recommendationId: recommendation.id, opportunityId: product.opportunityId, productId: params.productId, action: decision.action, confidence: decision.confidence },
+        });
+
+        return { recommendation };
+      },
+      CEO_REASONING_BUDGET,
+    );
+  },
+
+  /**
+   * The fourth, distinct entry point (docs/M7_ARCHITECTURE_PROPOSAL.md
+   * §28) — "what should happen to this product's launch or ongoing
+   * operation next," asked once a LaunchPlan exists. Same agent row,
+   * same zero-tool-call/zero-permission boundary, same bounded budget,
+   * same shared ceo_recommendations table (keyed by the Product's own
+   * opportunityId, mirroring recommendProductBuildAction exactly).
+   * Recommends only — LAUNCH never itself creates a DeploymentPlan,
+   * KILL_PRODUCT never itself archives the Product; a human decides
+   * through the ordinary PLAN/APPROVE/EXECUTE or productService-level
+   * paths (docs/SAAS_FACTORY.md's own "recommendations are not
+   * execution permissions" precedent, unchanged).
+   */
+  async recommendLaunchOperationsAction(params: { agentId: string; productId: string; startedBy: AuthenticatedActor }): Promise<RunOutcome<CeoReasoningResult>> {
+    const product = await productRepository.findById(params.productId);
+    if (!product) throw new NotFoundError("Product", params.productId);
+    const launchPlan = await launchPlanRepository.findLatestForProduct(params.productId);
+    if (!launchPlan) throw new ValidationError(`Product ${params.productId} has no LaunchPlan yet — the Launch Strategist must run first.`);
+
+    const [deploymentPlan, pricingModel, goToMarketPlan] = await Promise.all([
+      launchPlan.deploymentPlanId ? deploymentPlanRepository.findById(launchPlan.deploymentPlanId) : Promise.resolve(null),
+      launchPlan.pricingModelId ? pricingModelRepository.findById(launchPlan.pricingModelId) : Promise.resolve(null),
+      launchPlan.goToMarketPlanId ? goToMarketPlanRepository.findById(launchPlan.goToMarketPlanId) : Promise.resolve(null),
+    ]);
+
+    const groundedClaimIds = Array.from(
+      new Set([...(pricingModel ? fromJsonString<string[]>(pricingModel.groundedInClaimIds, []) : []), ...(goToMarketPlan ? fromJsonString<string[]>(goToMarketPlan.groundedInClaimIds, []) : [])]),
+    );
+    const claims = await claimRepository.listForOpportunity(product.opportunityId);
+    const groundedClaims = claims.filter((c) => groundedClaimIds.includes(c.id));
+
+    const unitEconomics = pricingModel ? fromJsonString<UnitEconomics>(pricingModel.unitEconomics, { costPerCustomerUsd: 0, grossMarginUsd: 0, grossMarginPct: 0, reasoning: "" }) : null;
+
+    const summary: LaunchPlanSummary = {
+      environment: deploymentPlan?.environment ?? "(no deployment plan)",
+      budgetExceeded: deploymentPlan?.budgetExceeded ?? false,
+      estimatedCostUsd: deploymentPlan?.estimatedCostUsd ?? 0,
+      grossMarginPct: unitEconomics?.grossMarginPct ?? null,
+      groundedClaimCount: groundedClaims.length,
+    };
+
+    const execution = await agentRuntimeService.startExecution({
+      agentId: params.agentId,
+      taskId: null,
+      input: { productId: params.productId, mode: "LAUNCH_OPERATIONS" },
+      startedBy: params.startedBy,
+    });
+
+    return agentRuntimeService.run(
+      execution.id,
+      async (handle) => {
+        handle.step();
+        const { value: decision } = await completeWithValidation(handle.callModel, launchOperationsDecisionSchema, {
+          systemPrompt: CEO_LAUNCH_OPERATIONS_SYSTEM_PROMPT,
+          maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
+          messages: [{ role: "user", content: buildLaunchOperationsPrompt(summary, groundedClaims) }],
+          devFixtureResponse: buildDevLaunchOperationsFixture(summary, groundedClaims),
+        });
+
+        await handle.transition("PROCESSING_RESULT");
+        handle.step();
+
+        const validClaimIds = new Set(groundedClaims.map((c) => c.id));
+        const citedClaimIds = decision.citedClaimIds.filter((id) => validClaimIds.has(id));
+        if (citedClaimIds.length === 0) {
+          throw new ValidationError("Launch-operations recommendation cited no real, verifiable claim id — refusing to persist an ungrounded recommendation.");
+        }
+
+        const priorityScore = computeDecisionPriority({
+          opportunityScore: PLACEHOLDER_NEUTRAL_SCORE,
+          confidenceScore: decision.confidence,
+          killRiskScore: summary.budgetExceeded ? 1 : 0,
+          topEvidenceGapImpactScore: PLACEHOLDER_NEUTRAL_SCORE,
+          maxClaimEIG: PLACEHOLDER_NEUTRAL_SCORE,
+          estimatedResearchCost: PLACEHOLDER_NEUTRAL_SCORE,
+          timeSensitivityScore: PLACEHOLDER_NEUTRAL_SCORE,
+          strategicFitScore: PLACEHOLDER_NEUTRAL_SCORE,
+        });
+
+        const recommendation = await ceoRecommendationRepository.create({
+          opportunityId: product.opportunityId,
+          decisionCycleId: null,
+          action: decision.action,
+          reasoning: decision.reasoning,
+          citedClaimIds: toJsonString(citedClaimIds),
+          citedValidationReportIds: toJsonString([]),
+          confidence: decision.confidence,
+          priorityScore,
+        });
+
+        await auditService.record({
+          actorType: "AGENT",
+          actorId: params.agentId,
+          action: `CEO_LAUNCH_OPERATIONS_RECOMMENDATION_${decision.action}`,
+          resourceType: "PRODUCT",
+          resourceId: params.productId,
+          result: "SUCCESS",
+          metadata: { recommendationId: recommendation.id, confidence: decision.confidence, ...summary },
         });
         await eventBus.publish({
           type: "CEO_RECOMMENDATION_ISSUED",

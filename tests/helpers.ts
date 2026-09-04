@@ -1,14 +1,17 @@
-import type { Agent, EngineeringTask, MvpArchitecture, Opportunity, Problem, Product, ProductSpec, Prospect, SignalCluster } from "@prisma/client";
+import type { Agent, DeploymentPlan, EngineeringTask, GoToMarketPlan, LaunchPlan, LaunchReviewMemo, MvpArchitecture, Opportunity, PricingModel, Problem, Product, ProductSpec, Prospect, SignalCluster } from "@prisma/client";
 import { agentService, type CreateAgentParams } from "../src/services/agent.service.js";
 import { signalClusterRepository } from "../src/db/repositories/signal-cluster.repository.js";
 import { claimExtractionService } from "../src/services/claim-extraction.service.js";
 import { engineeringAgentService } from "../src/services/engineering-agent.service.js";
 import { engineeringTaskService } from "../src/services/engineering-task.service.js";
+import { launchOperationsService } from "../src/services/launch-operations.service.js";
 import { mvpArchitectService } from "../src/services/mvp-architect.service.js";
 import { opportunityService } from "../src/services/opportunity.service.js";
 import type { OpportunityScoreDimensions } from "../src/services/opportunity-scorer.js";
 import type { KillRiskDimensions } from "../src/services/kill-risk-scorer.js";
 import { problemService } from "../src/services/problem.service.js";
+import { productFactoryService } from "../src/services/product-factory.service.js";
+import { productReviewMemoService } from "../src/services/product-review-memo.service.js";
 import { productService } from "../src/services/product.service.js";
 import { productStrategistService } from "../src/services/product-strategist.service.js";
 import { prospectService, type CreateProspectParams } from "../src/services/prospect.service.js";
@@ -149,6 +152,11 @@ export interface FullAgentSet {
   codeReviewAgent: Agent;
   qaAgent: Agent;
   securityReviewAgent: Agent;
+  /** M7 — docs/M7_ARCHITECTURE_PROPOSAL.md §30. Zero grants, like productStrategistAgent/ceoAgent (pure synthesis/reasoning over already-persisted rows; every M7 EXECUTE step is human-actor-only, never an agent tool call). */
+  launchStrategistAgent: Agent;
+  pricingAgent: Agent;
+  gtmAgent: Agent;
+  supportAgent: Agent;
 }
 
 /** Every agent role M3+M4's pipelines need, correctly permissioned (docs/M4_ARCHITECTURE_PROPOSAL.md §23). */
@@ -176,6 +184,10 @@ export async function makeFullAgentSet(): Promise<FullAgentSet> {
   const codeReviewAgent = await makeAgent({ role: "Code Review Agent" });
   const qaAgent = await makeAgent({ role: "QA Agent" });
   const securityReviewAgent = await makeAgent({ role: "Security Review Agent" });
+  const launchStrategistAgent = await makeAgent({ role: "Launch Strategist" });
+  const pricingAgent = await makeAgent({ role: "Pricing Agent" });
+  const gtmAgent = await makeAgent({ role: "GTM Agent" });
+  const supportAgent = await makeAgent({ role: "Support Agent" });
   return {
     researchAgent,
     problemAgent,
@@ -195,6 +207,10 @@ export async function makeFullAgentSet(): Promise<FullAgentSet> {
     codeReviewAgent,
     qaAgent,
     securityReviewAgent,
+    launchStrategistAgent,
+    pricingAgent,
+    gtmAgent,
+    supportAgent,
   };
 }
 
@@ -308,4 +324,85 @@ export async function makeCompletedEngineeringTask(): Promise<CompletedEngineeri
   if (outcome.status !== "COMPLETED" || !outcome.result.typecheckPassed) throw new Error("engineeringAgentService.run did not complete the store task");
 
   return { ...chain, workspacePath, storeTask: outcome.result.task, apiTask: apiTask! };
+}
+
+export interface ReadyForDeploymentChain {
+  agents: FullAgentSet;
+  opportunity: Opportunity;
+  product: Product;
+}
+
+/**
+ * The full M6 pipeline through a real human APPROVE decision — the
+ * exact sequence tests/integration/m6-capstone.test.ts's own positive
+ * path already exercises (makeApprovedProduct -> productFactoryService.build
+ * -> HUMAN_REVIEW -> recordHumanDecision(APPROVE) -> READY_FOR_DEPLOYMENT),
+ * factored out here as the shared starting point every M7 test needs
+ * (docs/M7_ARCHITECTURE_PROPOSAL.md §1: "M7 picks up from exactly that
+ * point"). Slow (real tsc/vitest runs inside the pipeline) — callers
+ * need a generous timeout, same as the M6 capstone's own 120_000ms.
+ */
+export async function makeReadyForDeploymentProduct(): Promise<ReadyForDeploymentChain> {
+  const { agents, product } = await makeApprovedProduct();
+  const summary = await productFactoryService.build({
+    productId: product.id,
+    strategistAgentId: agents.productStrategistAgent.id,
+    architectAgentId: agents.mvpArchitectAgent.id,
+    uxAgentId: agents.uxAgent.id,
+    engineeringAgentId: agents.engineeringAgent.id,
+    codeReviewAgentId: agents.codeReviewAgent.id,
+    qaAgentId: agents.qaAgent.id,
+    securityAgentId: agents.securityReviewAgent.id,
+    ceoAgentId: agents.ceoAgent.id,
+    startedBy: authActor(),
+  });
+  if (summary.product.status !== "HUMAN_REVIEW" || !summary.memo) {
+    throw new Error(`productFactoryService.build did not reach a decidable HUMAN_REVIEW memo (status: ${summary.product.status}, stoppedReason: ${summary.stoppedReason})`);
+  }
+  await productReviewMemoService.recordHumanDecision({ memoId: summary.memo.id, humanDecision: "APPROVE", humanReason: null, actor: humanOwner });
+
+  const finalProduct = await productService.getOrThrow(product.id);
+  if (finalProduct.status !== "READY_FOR_DEPLOYMENT") {
+    throw new Error(`Product did not reach READY_FOR_DEPLOYMENT after human APPROVE (status: ${finalProduct.status})`);
+  }
+  const opportunity = await opportunityService.getOrThrow(finalProduct.opportunityId);
+  return { agents, opportunity, product: finalProduct };
+}
+
+export interface AwaitingLaunchApprovalChain extends ReadyForDeploymentChain {
+  launchPlan: LaunchPlan;
+  deploymentPlan: DeploymentPlan;
+  pricingModel: PricingModel;
+  goToMarketPlan: GoToMarketPlan;
+  memo: LaunchReviewMemo;
+}
+
+/**
+ * makeReadyForDeploymentProduct(), plus a real, compiled LaunchReviewMemo
+ * in AWAITING_LAUNCH_APPROVAL — the shared starting point every test of
+ * the deployment/billing approve-and-execute flow needs
+ * (docs/M7_ARCHITECTURE_PROPOSAL.md §5, §17, §28-31).
+ */
+export async function makeAwaitingLaunchApprovalProduct(): Promise<AwaitingLaunchApprovalChain> {
+  const chain = await makeReadyForDeploymentProduct();
+  const summary = await launchOperationsService.planLaunch({
+    productId: chain.product.id,
+    launchStrategistAgentId: chain.agents.launchStrategistAgent.id,
+    pricingAgentId: chain.agents.pricingAgent.id,
+    gtmAgentId: chain.agents.gtmAgent.id,
+    ceoAgentId: chain.agents.ceoAgent.id,
+    startedBy: authActor(),
+  });
+  if (summary.product.status !== "AWAITING_LAUNCH_APPROVAL" || !summary.launchPlan || !summary.deploymentPlan || !summary.pricingModel || !summary.goToMarketPlan || !summary.memo) {
+    throw new Error(`launchOperationsService.planLaunch did not reach AWAITING_LAUNCH_APPROVAL with a full plan (status: ${summary.product.status}, stoppedReason: ${summary.stoppedReason})`);
+  }
+  return {
+    ...chain,
+    product: summary.product,
+    launchPlan: summary.launchPlan,
+    deploymentPlan: summary.deploymentPlan,
+    pricingModel: summary.pricingModel,
+    goToMarketPlan: summary.goToMarketPlan,
+    memo: summary.memo,
+  };
 }

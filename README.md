@@ -6,23 +6,41 @@ This repository is governed by [`CONSTITUTION.md`](./CONSTITUTION.md), the found
 
 ## Status
 
-**M1 — the VentureForge Operating Kernel — is implemented.** It's the
-smallest production-quality foundation the future company runs on: an
-Agent Registry, a Task Engine, an explicit Permission model, a Risk
-classification (GREEN/YELLOW/ORANGE/RED), an Approval Engine, an
-Evidence Engine, an Opportunity Engine with scoring, a Memory
-foundation, an Event log, an Audit log, and a Human Decision Queue —
-proven end to end by a vertical slice: a research signal becomes an
-evidence-backed, scored Opportunity with a governed decision request
-sitting in the Human Owner's queue, with every important action
-auditable.
+**M1 through M7 are implemented**, each layered on the same unmodified
+Guardian/Agent-Runtime kernel M1 established:
+
+- **M1 — Operating Kernel**: Agent Registry, Task Engine, Permission
+  model, Risk classification (GREEN/YELLOW/ORANGE/RED), Approval
+  Engine, Evidence Engine, Opportunity Engine, Memory, Event log,
+  Audit log, Human Decision Queue.
+- **M2 — Agent Execution + Governance Brain**: authenticated
+  identities, a bounded/budgeted Agent Runtime, a real model-provider
+  seam, a Research Agent, and the Chairman's first adversarial review.
+- **M3 — Opportunity Intelligence Engine**: real research-source
+  adapters, signal clustering, Problem/Competitor/Market analysis, and
+  opportunity generation with kill-risk scoring.
+- **M4 — Decision Intelligence Engine**: claim extraction and
+  validation, the CEO's own reasoning, Investment Memos, and the
+  KILL/PREPARE_REVIEW decision-queue wiring.
+- **M5 — Customer Discovery Intelligence**: ICP targeting, prospect
+  research, human-approved outreach drafts (never autonomous sending),
+  response analysis, and Customer Discovery Memos.
+- **M6 — SaaS Factory** (`docs/SAAS_FACTORY.md`): a real code-generation
+  and test pipeline in an isolated workspace — Product Strategist
+  through Engineering/Code-Review/QA/Security agents — ending at a
+  human go/no-go decision, never an autonomous deploy.
+- **M7 — Launch & Operations Engine** (`docs/LAUNCH_OPERATIONS.md`):
+  launch planning, pricing, go-to-market, deployment, and billing —
+  every consequential action split into agent PLAN, human APPROVE, and
+  a separate human-only EXECUTE step; no autonomous deployment,
+  billing activation, or spend.
 
 See `docs/OPERATING_MODEL.md` for how it operates, `docs/ARCHITECTURE.md`
-for how it's built, `docs/DATA_MODEL.md` for the schema,
-`docs/SECURITY.md` for its threat model, and `docs/DECISIONS.md` for
-why it's built this way. M1 does **not** implement the CEO, Chairman,
-Guardian, sales automation, or the SaaS factory — see
-`docs/OPERATING_MODEL.md` for what's deliberately out of scope.
+for how it's built, `docs/DATA_MODEL.md` for the M1 schema (each
+milestone's own `docs/M*_ARCHITECTURE_PROPOSAL.md` documents its own
+schema additions), `docs/SECURITY.md` for the full threat model across
+all seven milestones, and `docs/DECISIONS.md` for why it's built this
+way.
 
 ## Quick start
 

@@ -16,3 +16,12 @@ export function requireParam(req: Request, name: string): string {
   }
   return value;
 }
+
+/** Same discipline as requireParam, for a required `?name=value` query string parameter (docs/M7_ARCHITECTURE_PROPOSAL.md §34). */
+export function requireQueryParam(req: Request, name: string): string {
+  const value = req.query[name];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ValidationError(`Missing required query parameter: ${name}`);
+  }
+  return value;
+}
