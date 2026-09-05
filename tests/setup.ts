@@ -88,8 +88,14 @@ async function resetDatabase(): Promise<void> {
   // real gap this build's own autonomous-operations.test.ts caught: without
   // it, the first test to create a delivery row broke every later test's
   // reset with a foreign-key violation.
+  // Customer Discovery + Validation layer — docs/CUSTOMER_DISCOVERY_VALIDATION.md.
+  // discoveryFinding references customerDiscoveryInteraction (Restrict via
+  // repository, though the FK itself cascades) and customerEvidence can
+  // reference customerDiscoveryInteraction too, so both go before it.
+  await prisma.discoveryFinding.deleteMany();
   await prisma.customerDiscoveryMemo.deleteMany();
   await prisma.customerEvidence.deleteMany();
+  await prisma.customerDiscoveryInteraction.deleteMany();
   await prisma.customerResponse.deleteMany();
   await prisma.outreachMessageDelivery.deleteMany();
   await prisma.outreachMessage.deleteMany();

@@ -20,6 +20,9 @@ export interface CreateCustomerEvidenceParams extends CreateCustomerEvidenceInpu
  */
 export const customerEvidenceService = {
   async create(params: CreateCustomerEvidenceParams): Promise<CustomerEvidence> {
+    if (Boolean(params.responseId) === Boolean(params.discoveryInteractionId)) {
+      throw new ValidationError("CustomerEvidence must wrap exactly one of responseId or discoveryInteractionId, never both or neither.");
+    }
     if (!isCustomerSignalType(params.signalType)) {
       throw new ValidationError(`Unknown customer signal type: ${params.signalType}`);
     }
@@ -43,7 +46,12 @@ export const customerEvidenceService = {
       resourceType: "CUSTOMER_EVIDENCE",
       resourceId: customerEvidence.id,
       result: "SUCCESS",
-      metadata: { responseId: customerEvidence.responseId, evidenceId: customerEvidence.evidenceId, signalType: customerEvidence.signalType },
+      metadata: {
+        responseId: customerEvidence.responseId,
+        discoveryInteractionId: customerEvidence.discoveryInteractionId,
+        evidenceId: customerEvidence.evidenceId,
+        signalType: customerEvidence.signalType,
+      },
     });
     await eventBus.publish({
       type: "CUSTOMER_EVIDENCE_CREATED",

@@ -2,7 +2,9 @@ import type { CustomerEvidence } from "@prisma/client";
 import { prisma } from "../client.js";
 
 export interface CreateCustomerEvidenceInput {
-  responseId: string;
+  /** Exactly one of responseId/discoveryInteractionId must be set — enforced in customerEvidenceService.create. discoveryInteractionId is optional so pre-existing callers that only ever set responseId need no change. */
+  responseId: string | null;
+  discoveryInteractionId?: string | null;
   evidenceId: string;
   prospectId: string;
   signalType: string;

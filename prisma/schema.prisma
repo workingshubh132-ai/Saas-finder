@@ -291,6 +291,9 @@ model Opportunity {
   outreachExperiments    OutreachExperiment[]
   customerDiscoveryMemos CustomerDiscoveryMemo[]
 
+  /// Customer Discovery + Validation layer — docs/CUSTOMER_DISCOVERY_VALIDATION.md.
+  discoveryInteractions CustomerDiscoveryInteraction[]
+
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34. One row per build attempt (§3).
   products Product[]
 
@@ -456,6 +459,8 @@ model Identity {
   /// M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §22.
   outreachExperimentsCreated OutreachExperiment[]
   customerResponsesEntered   CustomerResponse[]
+  /// Customer Discovery + Validation layer — docs/CUSTOMER_DISCOVERY_VALIDATION.md.
+  discoveryInteractionsRecorded CustomerDiscoveryInteraction[]
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34.
   productsCreated            Product[]
 
@@ -1261,6 +1266,9 @@ model Prospect {
   customerResponses CustomerResponse[]
   customerEvidence  CustomerEvidence[]
 
+  /// Customer Discovery + Validation layer — docs/CUSTOMER_DISCOVERY_VALIDATION.md.
+  discoveryInteractions CustomerDiscoveryInteraction[]
+
   @@index([opportunityId])
   @@index([icpProfileId])
   @@index([status])
@@ -1370,6 +1378,10 @@ model OutreachMessage {
   /// Autonomous Operations Phase A — docs/AUTONOMOUS_OPERATIONS_AUDIT.md.
   deliveries OutreachMessageDelivery[]
 
+  /// Customer Discovery + Validation layer — docs/CUSTOMER_DISCOVERY_VALIDATION.md.
+  /// Set only when a discovery interaction is itself the reply to this message.
+  discoveryInteractions CustomerDiscoveryInteraction[]
+
   @@index([experimentId])
   @@index([prospectId])
   @@index([status])
@@ -1446,8 +1458,22 @@ model CustomerResponse {
 model CustomerEvidence {
   id String @id @default(cuid())
 
-  responseId String           @map("response_id")
-  response   CustomerResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  /// Exactly one of responseId/discoveryInteractionId is set — enforced
+  /// in customerEvidenceService.create (SQLite has no application-level
+  /// CHECK constraint support here), never both, never neither.
+  /// responseId: wraps a reply to an OutreachMessage this system itself
+  /// sent (the original M5 path, unchanged).
+  responseId String?           @map("response_id")
+  response   CustomerResponse? @relation(fields: [responseId], references: [id], onDelete: Cascade)
+
+  /// discoveryInteractionId: wraps a finding from the Customer Discovery
+  /// + Validation layer (docs/CUSTOMER_DISCOVERY_VALIDATION.md) — an
+  /// interview, call, or a reply to a message sent outside the governed
+  /// outbound path. Added so interaction-sourced evidence reuses the
+  /// exact same signal-routing/independence protections as response-
+  /// sourced evidence, rather than a second, weaker pipeline.
+  discoveryInteractionId String?                       @map("discovery_interaction_id")
+  discoveryInteraction   CustomerDiscoveryInteraction? @relation(fields: [discoveryInteractionId], references: [id], onDelete: Cascade)
 
   /// The real Evidence row this wraps — Restrict: must never be deleted out from under it (§22).
   evidenceId String   @map("evidence_id")
@@ -1471,9 +1497,100 @@ model CustomerEvidence {
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([responseId])
+  @@index([discoveryInteractionId])
   @@index([evidenceId])
   @@index([prospectId])
   @@map("customer_evidence")
+}
+
+/// A real, governed customer-discovery interaction — Phase 2 of
+/// docs/CUSTOMER_DISCOVERY_VALIDATION.md. Generalizes CustomerResponse
+/// (which requires a prior OutreachMessage this system itself sent) to
+/// also cover a founder-run interview/call, or a reply to a message
+/// sent manually outside the governed outbound path — outreachMessageId
+/// is therefore optional, unlike CustomerResponse.outreachMessageId.
+model CustomerDiscoveryInteraction {
+  id String @id @default(cuid())
+
+  opportunityId String      @map("opportunity_id")
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  prospectId String   @map("prospect_id")
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Restrict)
+
+  /// Optional — set only when this interaction is a reply to a message VentureForge itself sent through outboundMessageService.
+  outreachMessageId String?          @map("outreach_message_id")
+  outreachMessage   OutreachMessage? @relation(fields: [outreachMessageId], references: [id], onDelete: SetNull)
+
+  /// One of CUSTOMER_DISCOVERY_INTERACTION_TYPES (discovery-interaction.types.ts).
+  interactionType String   @map("interaction_type")
+  interactionDate DateTime @map("interaction_date")
+  channel         String?
+  participantRole String?  @map("participant_role")
+
+  /// Immutable once recorded — the raw, un-interpreted account, exactly like CustomerResponse.rawContent.
+  rawNotes String @map("raw_notes")
+
+  /// REAL | DEV_FIXTURE | HUMAN_ACTION | SIMULATED (src/domain/real-world/reality.types.ts) — reused verbatim, never a new taxonomy.
+  /// REAL/HUMAN_ACTION require a non-empty provenanceNote (buildRealWorldTag's own enforcement).
+  reality        String
+  provenanceNote String @map("provenance_note")
+
+  /// One of CUSTOMER_DISCOVERY_INTERACTION_STATUSES — RECORDED -> ANALYZED.
+  status String @default("RECORDED")
+
+  /// One of CUSTOMER_DISCOVERY_INTERACTION_OUTCOMES; null until a human/analyst classifies the interaction's overall outcome.
+  /// The ONE deterministic signal customerValidationService reads to detect disqualifying evidence — never inferred from free-text finding values.
+  interactionOutcome String? @map("interaction_outcome")
+
+  recordedByIdentityId String   @map("recorded_by_identity_id")
+  recordedByIdentity   Identity @relation(fields: [recordedByIdentityId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  findings         DiscoveryFinding[]
+  customerEvidence CustomerEvidence[]
+
+  @@index([opportunityId])
+  @@index([prospectId])
+  @@index([outreachMessageId])
+  @@index([status])
+  @@map("customer_discovery_interactions")
+}
+
+/// One structured finding extracted from one interaction (Phase 3) —
+/// each field independently tagged OBSERVED/INFERRED/UNKNOWN. Only
+/// OBSERVED findings are ever promoted to a real Evidence+CustomerEvidence
+/// pair (customerDiscoveryInteractionService.attachFinding) — the
+/// concrete mechanism that makes "never let an inferred value masquerade
+/// as observed evidence" true by construction, not by convention.
+model DiscoveryFinding {
+  id String @id @default(cuid())
+
+  interactionId String                       @map("interaction_id")
+  interaction   CustomerDiscoveryInteraction @relation(fields: [interactionId], references: [id], onDelete: Cascade)
+
+  /// One of DISCOVERY_FINDING_FIELDS (discovery-interaction.types.ts).
+  field String
+
+  /// OBSERVED | INFERRED | UNKNOWN (src/domain/customer-discovery/provenance.ts).
+  provenance String
+
+  /// Human-readable value. For provenance=UNKNOWN this is normally an explanation ("not asked yet"), never a fabricated answer.
+  value String
+
+  /// Verbatim customer language backing this finding, when available — never required, never fabricated if absent.
+  evidenceQuote String? @map("evidence_quote")
+
+  /// Set when the linked Evidence/CustomerEvidence pair was actually created for this finding (provenance=OBSERVED and the field maps to a CustomerSignalType). Null otherwise.
+  promotedToEvidenceId String? @map("promoted_to_evidence_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([interactionId])
+  @@index([field])
+  @@map("discovery_findings")
 }
 
 /// One experiment's findings (§22, brief §29) — mirrors InvestmentMemo's

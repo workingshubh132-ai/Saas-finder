@@ -16,6 +16,14 @@ export const CUSTOMER_SIGNAL_TYPES = [
   "OBJECTION",
   "ALTERNATIVE",
   "REQUEST",
+  // Added for the customer-discovery-interaction boundary (docs/CUSTOMER_DISCOVERY_VALIDATION.md) —
+  // structured findings from an interview/call that don't fit an existing type. Additive only:
+  // every signal type above is unchanged in meaning and every existing routing entry is untouched.
+  "WORKFLOW",
+  "VOLUME",
+  "TIME_COST",
+  "CONSEQUENCE",
+  "AUTOMATION_ATTEMPT",
 ] as const;
 export type CustomerSignalType = (typeof CUSTOMER_SIGNAL_TYPES)[number];
 

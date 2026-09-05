@@ -243,6 +243,7 @@ export const responseAnalystService = {
 
           await customerEvidenceService.create({
             responseId: response.id,
+            discoveryInteractionId: null,
             evidenceId: evidence.id,
             prospectId: prospect.id,
             signalType: extraction.signalType,
