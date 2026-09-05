@@ -16,6 +16,8 @@ import { detectAnomaly, MIN_BASELINE_PERIODS } from "../domain/anomaly/anomaly.t
 import { isComputed, type MetricResult } from "../domain/shared/metric-result.js";
 import { createProductUsageProvider } from "../providers/product-usage-provider-factory.js";
 import { createRevenueProvider } from "../providers/revenue-provider-factory.js";
+import { alertService } from "./alert.service.js";
+import { eventBus } from "./event-bus.js";
 
 const TRAILING_BASELINE_PERIODS = 6;
 
@@ -95,6 +97,8 @@ export const metricEngineService = {
     if (isComputed(result.mrr)) {
       const mrrMetric = await businessMetricRepository.create({ productId, metricType: "MRR", valueKind: "OBSERVED", value: result.mrr.value, source: "REVENUE_PROVIDER" });
       mrrMetricId = mrrMetric.id;
+      // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — no event fired when an OBSERVED MRR row was recorded before this fix.
+      await eventBus.publish({ type: "REVENUE_OBSERVED", payload: { productId, metricId: mrrMetric.id, value: result.mrr.value } });
     }
     // ARR and ARPU are both deterministically derived from the MRR row just recorded — INFERRED requires
     // a real inputMetricIds citation (assertMetricProvenance), so both are gated on that row actually existing.
@@ -177,7 +181,7 @@ export const metricEngineService = {
       return null;
     }
 
-    return anomalyRepository.create({
+    const anomaly = await anomalyRepository.create({
       productId,
       metricType,
       direction: detection.direction,
@@ -187,6 +191,17 @@ export const metricEngineService = {
       zScore: detection.zScore,
       reason: detection.reason,
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §8, §42 — no M8 event fired here before this fix.
+    await eventBus.publish({ type: "ANOMALY_DETECTED", payload: { anomalyId: anomaly.id, productId, metricType, direction: anomaly.direction, zScore: anomaly.zScore } });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §35-36 — a real, already-detected anomaly is alert-worthy by construction (detectAnomaly only returns isAnomaly=true past its own threshold); never a second detector.
+    await alertService.raise({
+      alertType: "ANOMALY",
+      severity: Math.abs(anomaly.zScore) >= 4 ? "CRITICAL" : "WARNING",
+      resourceType: "PRODUCT",
+      resourceId: productId,
+      message: `${metricType} ${anomaly.direction === "UP" ? "spiked" : "dropped"} (z-score ${anomaly.zScore.toFixed(2)}): ${anomaly.reason}`,
+    });
+    return anomaly;
   },
 
   listForProduct(productId: string): Promise<BusinessMetric[]> {

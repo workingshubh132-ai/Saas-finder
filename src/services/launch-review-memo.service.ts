@@ -144,6 +144,8 @@ export const launchReviewMemoService = {
       result: "SUCCESS",
       metadata: { memoId: memo.id, humanReason: params.humanReason },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — the one cross-milestone event decisionQueueService's own unification (§19) makes real at the event layer.
+    await eventBus.publish({ type: "HUMAN_DECISION_MADE", payload: { source: "LAUNCH_REVIEW_MEMO", memoId: updated.id, decision: params.humanDecision } });
 
     return updated;
   },

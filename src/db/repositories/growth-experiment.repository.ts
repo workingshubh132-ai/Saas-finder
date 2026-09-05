@@ -35,6 +35,11 @@ export const growthExperimentRepository = {
     return prisma.growthExperiment.findMany({ where: { productId }, orderBy: { createdAt: "desc" } });
   },
 
+  /** Cross-product (docs/M9_ARCHITECTURE_PROPOSAL.md §46's own EXPERIMENTS briefing section). */
+  list(filter: { status?: string } = {}): Promise<GrowthExperiment[]> {
+    return prisma.growthExperiment.findMany({ where: { status: filter.status }, orderBy: { createdAt: "desc" } });
+  },
+
   updateStatus(id: string, status: string): Promise<GrowthExperiment> {
     return prisma.growthExperiment.update({ where: { id }, data: { status } });
   },

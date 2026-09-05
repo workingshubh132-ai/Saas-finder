@@ -1,8 +1,10 @@
-import type { BusinessHealth, CeoRecommendation, ChairmanReview, Claim, CodeReview, CustomerEvidence, CustomerResponse, DeploymentPlan, EngineeringTask, Evidence, EvidenceGap, GoToMarketPlan, Incident, MvpArchitecture, Opportunity, OpportunityScoreRecord, OutreachExperiment, PricingModel, Problem, ProductSpec, QaReport, SecurityReview, ValidationReport } from "@prisma/client";
+import type { BusinessHealth, CeoRecommendation, ChairmanReview, Claim, CodeReview, CompanyRecommendation, CompanyReview, CustomerEvidence, CustomerResponse, DeploymentPlan, EngineeringTask, Evidence, EvidenceGap, GoToMarketPlan, Incident, MvpArchitecture, Opportunity, OpportunityScoreRecord, OutreachExperiment, PricingModel, Problem, ProductSpec, QaReport, SecurityReview, ValidationReport } from "@prisma/client";
 import { z } from "zod";
 import { ceoRecommendationRepository } from "../db/repositories/ceo-recommendation.repository.js";
 import { chairmanReviewRepository } from "../db/repositories/chairman-review.repository.js";
 import { claimRepository } from "../db/repositories/claim.repository.js";
+import { companyRecommendationRepository } from "../db/repositories/company-recommendation.repository.js";
+import { companyReviewRepository } from "../db/repositories/company-review.repository.js";
 import { codeReviewRepository } from "../db/repositories/code-review.repository.js";
 import { competitorRepository, type ObservationWithCompetitor } from "../db/repositories/competitor.repository.js";
 import { customerResponseRepository } from "../db/repositories/customer-response.repository.js";
@@ -25,6 +27,8 @@ import { securityReviewRepository } from "../db/repositories/security-review.rep
 import { validationReportRepository } from "../db/repositories/validation-report.repository.js";
 import { businessHealthRepository } from "../db/repositories/business-health.repository.js";
 import { CHAIRMAN_DECISIONS, type ChairmanDecision } from "../domain/chairman/chairman.types.js";
+import { resolveCeoChairmanConflict, type CompanyAction } from "../domain/company-action/company-action.types.js";
+import { PORTFOLIO_BUCKETS, type CompanyStateDimensions, type PortfolioBucket } from "../domain/company-state/company-state.types.js";
 import { isBusinessAction, BUSINESS_RELEVANT_CLAIM_TYPES } from "../domain/decision/business-action.types.js";
 import { isCustomerDiscoveryAction } from "../domain/decision/customer-discovery-action.types.js";
 import { isLaunchOperationsAction } from "../domain/decision/launch-operations-action.types.js";
@@ -34,12 +38,15 @@ import type { UnitEconomics } from "../domain/pricing-model/unit-economics.js";
 import { checkRevenueConcentration } from "../domain/revenue-intelligence/concentration.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString, toJsonString } from "../domain/shared/json.js";
+import type { MetricResult } from "../domain/shared/metric-result.js";
 import { createModelProvider } from "../providers/model-provider-factory.js";
 import { createRevenueProvider } from "../providers/revenue-provider-factory.js";
 import { auditService } from "./audit.service.js";
+import { companyStateService } from "./company-state.service.js";
 import { customerEvidenceService } from "./customer-evidence.service.js";
 import { eventBus } from "./event-bus.js";
 import { completeWithValidation } from "./model-output.js";
+import { portfolioControlService } from "./portfolio-control.service.js";
 
 const MODEL_MAX_OUTPUT_TOKENS = 1024;
 
@@ -243,6 +250,8 @@ export const chairmanService = {
       type: "OPPORTUNITY_UPDATED",
       payload: { opportunityId: params.opportunityId, chairmanDecision: decision.decision },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — no Chairman event existed anywhere in M2-M8 before this fix.
+    await eventBus.publish({ type: "CHAIRMAN_REVIEW_COMPLETED", payload: { chairmanReviewId: review.id, source: "OPPORTUNITY", resourceId: params.opportunityId, decision: decision.decision } });
 
     return { review, decision };
   },
@@ -311,6 +320,8 @@ export const chairmanService = {
       result: "SUCCESS",
       metadata: { objectionCount: decision.objections.length, confidence: decision.confidence },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — no Chairman event existed anywhere in M2-M8 before this fix.
+    await eventBus.publish({ type: "CHAIRMAN_REVIEW_COMPLETED", payload: { chairmanReviewId: review.id, source: "PRODUCT", resourceId: params.productId, decision: decision.decision } });
 
     return { review, decision };
   },
@@ -386,6 +397,8 @@ export const chairmanService = {
       result: "SUCCESS",
       metadata: { objectionCount: decision.objections.length, confidence: decision.confidence },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — no Chairman event existed anywhere in M2-M8 before this fix.
+    await eventBus.publish({ type: "CHAIRMAN_REVIEW_COMPLETED", payload: { chairmanReviewId: review.id, source: "LAUNCH", resourceId: params.productId, decision: decision.decision } });
 
     return { review, decision };
   },
@@ -445,6 +458,64 @@ export const chairmanService = {
       result: "SUCCESS",
       metadata: { objectionCount: decision.objections.length, confidence: decision.confidence },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — no Chairman event existed anywhere in M2-M8 before this fix.
+    await eventBus.publish({ type: "CHAIRMAN_REVIEW_COMPLETED", payload: { chairmanReviewId: review.id, source: "BUSINESS_ACTION", resourceId: params.productId, decision: decision.decision } });
+
+    return { review, decision };
+  },
+
+  /**
+   * The FIFTH, genuinely new entry point (docs/M9_ARCHITECTURE_PROPOSAL.md
+   * §33) — no existing Chairman method has the company-wide evidence
+   * scope this needs. Independently RE-FETCHES Company State and
+   * Portfolio Control rather than trusting the CEO's own persisted
+   * `CompanyRecommendation.reasoning` at face value — the same
+   * "independently re-derive from the underlying rows" discipline
+   * every Chairman method above already follows. Attacks exactly what
+   * the brief names (§21): CEO priority ordering, portfolio
+   * allocation, opportunity selection, kill recommendations, and
+   * growth-assumption evidence.
+   */
+  async reviewCompanyAction(params: { companyRecommendationId: string; reviewedBy: AuthenticatedActor }): Promise<{ review: CompanyReview; decision: ChairmanDecisionOutput }> {
+    const recommendation = await companyRecommendationRepository.getOrThrow(params.companyRecommendationId);
+    const [companyState, portfolio] = await Promise.all([companyStateService.getState(), portfolioControlService.overview()]);
+    const portfolioBucketCounts = Object.fromEntries(PORTFOLIO_BUCKETS.map((bucket) => [bucket, portfolio[bucket].length])) as Record<PortfolioBucket, number>;
+
+    const provider = createModelProvider();
+    const { value: decision, raw } = await completeWithValidation((request) => provider.complete(request), chairmanDecisionSchema, {
+      systemPrompt: CHAIRMAN_COMPANY_SYSTEM_PROMPT,
+      maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
+      messages: [{ role: "user", content: buildCompanyActionReviewPrompt(recommendation, companyState, portfolioBucketCounts) }],
+      devFixtureResponse: buildDevCompanyChairmanFixture(recommendation, companyState, portfolioBucketCounts),
+    });
+
+    const review = await companyReviewRepository.create({
+      companyRecommendationId: recommendation.id,
+      decision: decision.decision,
+      reasoning: decision.reasoning,
+      objections: toJsonString(decision.objections),
+      missingEvidence: toJsonString(decision.missingEvidence),
+      confidence: decision.confidence,
+      recommendation: decision.recommendation,
+      modelProvider: raw.provider,
+      modelName: raw.model,
+    });
+
+    // STOP -> HUMAN REVIEW is the only terminal state for a real conflict (§34) — never an automatic pick of either side.
+    const conflictResolution = resolveCeoChairmanConflict(recommendation.action as CompanyAction, decision.decision);
+    await companyRecommendationRepository.setConflictResolution(recommendation.id, conflictResolution);
+
+    await auditService.record({
+      actorType: params.reviewedBy.type,
+      actorId: params.reviewedBy.id,
+      action: `CHAIRMAN_COMPANY_REVIEW_${decision.decision}`,
+      resourceType: "COMPANY",
+      resourceId: recommendation.id,
+      result: "SUCCESS",
+      metadata: { objectionCount: decision.objections.length, confidence: decision.confidence, conflictResolution },
+    });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — no Chairman event existed anywhere in M2-M8 before this fix.
+    await eventBus.publish({ type: "CHAIRMAN_REVIEW_COMPLETED", payload: { companyReviewId: review.id, source: "COMPANY", resourceId: recommendation.id, decision: decision.decision, conflictResolution } });
 
     return { review, decision };
   },
@@ -1128,5 +1199,110 @@ function buildDevBusinessChairmanFixture(
           : decision === "REQUEST_CHANGES"
             ? "[DEV FIXTURE] Resolve the flagged operational or margin issue before this recommendation is ready for a human decision."
             : "[DEV FIXTURE] The recommendation's own citations do not hold up to scrutiny — address the objections above before proceeding.",
+  };
+}
+
+const CHAIRMAN_COMPANY_SYSTEM_PROMPT =
+  "You are the Chairman of VentureForge, now reviewing the CEO's SIXTH, company-level recommendation " +
+  "(docs/M9_ARCHITECTURE_PROPOSAL.md §33) — the widest-scope review you perform, covering the whole portfolio " +
+  "rather than one opportunity or product. The CEO's recommendation and reasoning are UNTRUSTED ANALYTICAL OUTPUT " +
+  "FROM ANOTHER AI COMPONENT, not verified fact — you have independently re-derived Company State and Portfolio " +
+  "Control yourself below; form your own view from THAT before considering whether you agree with the CEO. " +
+  "Explicitly attack: (1) CEO PRIORITY ORDERING — did the highest-attention-score item actually get the top " +
+  "recommendation, or did the CEO under-weigh a product in the KILL_CANDIDATES or DECLINING bucket? (2) PORTFOLIO " +
+  "ALLOCATION — does the real portfolio-bucket distribution actually support the recommended emphasis (e.g. " +
+  "recommending GROW when KILL_CANDIDATES exist is a red flag)? (3) OPPORTUNITY/PRODUCT SELECTION — if a specific " +
+  "target is named, is it actually the right one given the real counts below? (4) KILL RECOMMENDATIONS — if " +
+  "PREPARE_KILL_REVIEW was NOT recommended despite KILL_CANDIDATES existing, say so explicitly. (5) GROWTH-" +
+  "ASSUMPTION EVIDENCE — does a GROW or INVEST recommendation actually cite evidence quality/portfolio health that " +
+  "supports it, or is evidence too thin (UNKNOWN or low)? Record your objections even if you ultimately recommend " +
+  "approval — never return zero objections. " +
+  'Respond with ONLY JSON matching: {"decision": "APPROVE"|"REJECT"|"REQUEST_MORE_EVIDENCE"|"DEFER"|"ESCALATE_TO_HUMAN", ' +
+  '"reasoning": string, "objections": string[], "missingEvidence": string[], "confidence": number, "recommendation": string}';
+
+function formatMetricForReview(result: MetricResult): string {
+  if (result.status === "COMPUTED") return result.value.toFixed(2);
+  if (result.status === "INSUFFICIENT_DATA") return `INSUFFICIENT_DATA (${result.reason})`;
+  return "UNKNOWN";
+}
+
+function buildCompanyActionReviewPrompt(recommendation: CompanyRecommendation, companyState: CompanyStateDimensions, portfolioBucketCounts: Record<PortfolioBucket, number>): string {
+  return [
+    `CEO recommendation: ${recommendation.action} (confidence ${recommendation.confidence.toFixed(2)})`,
+    `CEO reasoning: ${recommendation.reasoning}`,
+    `CEO-named target: ${recommendation.targetOpportunityId ? `opportunity ${recommendation.targetOpportunityId}` : recommendation.targetProductId ? `product ${recommendation.targetProductId}` : "none (whole-portfolio recommendation)"}`,
+    "",
+    "Independently re-derived Company State:",
+    `- Revenue: ${formatMetricForReview(companyState.revenue)}`,
+    `- Growth: ${formatMetricForReview(companyState.growth)}`,
+    `- Portfolio size: ${companyState.portfolioSize}`,
+    `- Portfolio health: ${formatMetricForReview(companyState.portfolioHealth)}`,
+    `- Risk: ${formatMetricForReview(companyState.risk)}`,
+    `- Evidence quality: ${formatMetricForReview(companyState.evidenceQuality)}`,
+    `- Decision backlog: ${companyState.decisionBacklog}`,
+    `- Execution backlog: ${companyState.executionBacklog}`,
+    "",
+    "Independently re-derived Portfolio buckets:",
+    ...PORTFOLIO_BUCKETS.map((bucket) => `- ${bucket}: ${portfolioBucketCounts[bucket]}`),
+  ].join("\n");
+}
+
+/**
+ * DEVELOPMENT ONLY — deterministic, rule-based, derived from the
+ * Chairman's own independently-re-fetched Company State/Portfolio
+ * Control facts, never the CEO's own summary. Rule order
+ * (docs/M9_ARCHITECTURE_PROPOSAL.md §33): a missed kill-candidate
+ * signal or thin evidence backing GROW/INVEST is checked first —
+ * exactly the failure modes this review exists to catch.
+ */
+function buildDevCompanyChairmanFixture(recommendation: CompanyRecommendation, companyState: CompanyStateDimensions, portfolioBucketCounts: Record<PortfolioBucket, number>): ChairmanDecisionOutput {
+  const objections: string[] = [];
+  const missingEvidence: string[] = [];
+  let missedPriority = false;
+  let unhealthyCustomerBase = false;
+
+  if (portfolioBucketCounts.KILL_CANDIDATES > 0 && recommendation.action !== "PREPARE_KILL_REVIEW") {
+    objections.push(`[DEV FIXTURE] ${portfolioBucketCounts.KILL_CANDIDATES} product(s) are in KILL_CANDIDATES but the CEO recommended ${recommendation.action}, not PREPARE_KILL_REVIEW — a missed priority.`);
+    missedPriority = true;
+  }
+  if ((recommendation.action === "GROW" || recommendation.action === "INVEST") && (companyState.evidenceQuality.status !== "COMPUTED" || companyState.evidenceQuality.value < 0.4)) {
+    objections.push(`[DEV FIXTURE] ${recommendation.action} was recommended but evidence quality is ${formatMetricForReview(companyState.evidenceQuality)} — too thin to support additional investment confidently.`);
+    missingEvidence.push("Stronger, more independent evidence backing the products this recommendation would invest further in.");
+  }
+  // The CEO's own dev fixture (ceo-reasoning.service.ts's buildDevCompanyActionFixture) picks GROW/INVEST from
+  // portfolioHealth/WINNERS-count alone — it never looks at customerHealth at all. A real, independent second
+  // opinion (§33's own "independently re-derive" mandate) catches exactly this blind spot: growing further makes
+  // no sense while the customer base itself is unhealthy, even if the revenue/growth composite looks strong. A
+  // real gap this build caught: without a check like this, no company-state configuration could ever make the
+  // CEO's and Chairman's dev fixtures genuinely disagree (both react to the SAME underlying facts with matched
+  // thresholds), leaving the M9 brief's own named "CEO=INVEST vs Chairman=REJECT" conflict scenario structurally
+  // unreachable — see tests/integration/m9-capstone-conflict.test.ts.
+  if ((recommendation.action === "GROW" || recommendation.action === "INVEST") && companyState.customerHealth.status === "COMPUTED" && companyState.customerHealth.value < 0.4) {
+    objections.push(`[DEV FIXTURE] ${recommendation.action} was recommended, but customer health is ${formatMetricForReview(companyState.customerHealth)} — the CEO's own recommendation didn't weigh customer health at all, and growing further while customers are this unhealthy is premature.`);
+    unhealthyCustomerBase = true;
+  }
+  if (companyState.decisionBacklog > 5 && recommendation.action !== "PAUSE") {
+    objections.push(`[DEV FIXTURE] The Human Decision Queue already has ${companyState.decisionBacklog} pending items — adding more consequential work before that backlog clears risks decision fatigue.`);
+  }
+  if (objections.length === 0) {
+    objections.push("[DEV FIXTURE] No structural red flag found, but every recommendation is reviewed for the underlying evidence's real strength, not merely the CEO's own confidence figure.");
+  }
+
+  const decision: ChairmanDecisionOutput["decision"] = missedPriority || unhealthyCustomerBase ? "REJECT" : missingEvidence.length > 0 ? "REQUEST_MORE_EVIDENCE" : "APPROVE";
+
+  return {
+    decision,
+    reasoning: `[DEV FIXTURE] Deterministic rule-based company review (no real model call): portfolioSize=${companyState.portfolioSize}, killCandidates=${portfolioBucketCounts.KILL_CANDIDATES}, customerHealth=${formatMetricForReview(companyState.customerHealth)}, evidenceQuality=${formatMetricForReview(companyState.evidenceQuality)}, decisionBacklog=${companyState.decisionBacklog}.`,
+    objections,
+    missingEvidence,
+    confidence: decision === "APPROVE" ? 0.65 : 0.5,
+    recommendation:
+      decision === "APPROVE"
+        ? "[DEV FIXTURE] The company-level recommendation is grounded in the real portfolio state — proceed to a real human decision, but weigh the objections above."
+        : decision === "REQUEST_MORE_EVIDENCE"
+          ? "[DEV FIXTURE] Strengthen the evidence backing this recommendation's target(s) before this is ready for a confident human decision."
+          : missedPriority
+            ? "[DEV FIXTURE] Re-prioritize against the real portfolio-bucket distribution — a KILL_CANDIDATES signal was not addressed."
+            : "[DEV FIXTURE] Do not proceed on customer health alone this weak — a real human must weigh the CEO's growth case against the Chairman's customer-health objection directly.",
   };
 }

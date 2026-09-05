@@ -1500,3 +1500,97 @@ milestone's work; every M8 capability reuses VentureForge's own
 already-installed `express`/`zod`/`@prisma/client`/`vitest`/`typescript`.
 `npm audit --omit=dev` reports the same pre-existing advisories prior
 milestones already documented — unchanged by M8, not newly introduced.
+
+## M9 — Company Control Plane & Operating System
+
+Full architecture in `docs/M9_ARCHITECTURE_PROPOSAL.md`; the unified
+company-level view is in `docs/COMPANY_CONTROL_PLANE.md`. This section
+walks the brief's own threat table (§51 of the proposal) one row at a
+time, each tied to a concrete mechanism and a real test.
+
+### The core containment boundary: a coordinator that holds no permission and executes nothing
+
+`controlPlaneService` — the one new facade this milestone adds — holds
+**zero** Guardian permission grants and calls **zero** execute-capable
+service directly. Every consequential step it triggers (`ceoReasoningService.recommendCompanyAction`,
+`chairmanService.reviewCompanyAction`, `schedulerService.advanceStage`)
+either only reads already-persisted rows or defers to the exact same
+PLAN/APPROVE/EXECUTE chain M6/M7 already built and gated — M9 adds
+**zero new execution paths** (`docs/M9_ARCHITECTURE_PROPOSAL.md` §32's
+own closing line, reaffirmed structurally: `runNextStage`'s own
+`EXECUTING` case is bookkeeping-only, never a provider call). No M9
+agent exists at all — the CEO and Chairman roles this milestone extends
+are the same identities M1-M8 already created; `PERMISSIONS` gains
+**zero** new entries.
+
+### The threat review
+
+| Threat | Mitigation | Test |
+| --- | --- | --- |
+| Control-plane takeover | `controlPlaneService` holds no Guardian permission and never bypasses `assertHumanActor` for a consequential step | `tests/integration/m9-security.test.ts` |
+| Privilege escalation | Zero new permissions; every M9 write is GREEN-tier persistence of already-computed analysis | `tests/integration/m9-security.test.ts` (`recommendCompanyAction` completes for a zero-permission CEO agent) |
+| Scheduler abuse | The scheduler is stateless, bounded, explicitly invoked (§17) — nothing to abuse that isn't already gated by the cycle's own budget/human gates | `tests/integration/m9-capstone-operating-cycle.test.ts` |
+| Approval replay / stale approvals | `computeResourceStateHash` captured at request time, compared at EXECUTE time (`assertFresh`); a changed resource is refused, never silently re-approved | `tests/integration/m9-security.test.ts`, `tests/unit/m9-approval-staleness.test.ts` |
+| Cross-product access | §21's own per-product aggregation never joins across `productId` without an explicit, named cross-product read | (structural — code review; `tests/integration/m9-reporting-layer.test.ts` exercises the real reads but doesn't test the boundary directly) |
+| Memory poisoning | `decisionMemoryService` builds only from already-governed sources (`LearningRecord`/`DecisionOutcome`) — no code path from raw external text to a lesson that skips Claim/Evidence validation | (structural — code review; `tests/integration/m9-capstone-memory.test.ts` proves the wiring reaches the CEO's prompt, not this specific claim) |
+| CEO manipulation | `recommendCompanyAction` only reads already-validated Company State/Portfolio rows, never raw external input directly | (structural — code review; unchanged from M8's own #13, which this axis inherits) |
+| Chairman manipulation | `reviewCompanyAction` independently re-fetches Company State/Portfolio rather than trusting the CEO's own citations | `tests/integration/m9-capstone-conflict.test.ts` |
+| Event poisoning | `Event`/`eventBus` remain internal-only — no external write path, unchanged since M1 | (unchanged, no new surface) |
+| Metric poisoning | `assertMetricProvenance` (M8, unchanged) still gates every `BusinessMetric` row M9 reads | (unchanged, no new surface) |
+| Decision poisoning / race conditions | Concurrency conflict detection (§40) surfaces a real conflict rather than silently accepting it — never a lock, both recommendations stay visible | `tests/integration/m9-security.test.ts` |
+| Resource exhaustion | Company Budget (§50) rollup, checked at every stage-advance; a real oversized spend actually STOPS the cycle and raises an alert, not just reports it | `tests/integration/m9-security.test.ts` |
+| Agent loops | Existing per-execution step/retry ceilings, unchanged | (unchanged, no new surface) |
+| Secret exposure | No new credential anywhere in M9 — dev-fixture-only providers, unchanged from M7/M8 | (unchanged, no new surface) |
+| Financial manipulation | No execution capability exists in M9 at all (containment boundary above) | (unchanged, no new surface) |
+| Duplicate execution | Idempotency-key-aware `startCycle` — a second call with the same key returns the existing cycle unchanged | `tests/integration/m9-security.test.ts` |
+| Emergency-stop bypass | `emergencyStopService.isActive()` fails closed on a read error; checked at the scheduler's own move into EXECUTING and at all three real EXECUTE call sites (deployment/billing/growth-experiment) | `tests/integration/m9-security.test.ts` |
+| Emergency-stop / OperatingCycle governance escalation | Activate/resume, and OperatingCycle pause/cancel, are all `assertHumanActor`-gated — an AGENT credential is rejected at the service layer directly, not just at the HTTP boundary | `tests/integration/m9-security.test.ts`, `tests/integration/api-m9.test.ts` |
+| Unauthorized company-level decision | `companyRecommendationService.recordHumanDecision` is `assertHumanActor`-gated and idempotent — a second call with a different decision never overwrites the first | `tests/integration/m9-security.test.ts`, `tests/integration/m9-capstone-conflict.test.ts` |
+
+### Data isolation
+
+M9 introduces no new cross-product read path beyond what M8 already
+established (`portfolioControlService.overview()` reuses the exact same
+explicit, caller-supplied product set discipline
+`portfolioAnalystService.run` already established, §9 of the M8
+review). Company-wide reads (`companyStateService.getState()`,
+`briefingService.generate()`) are aggregations over already-scoped
+per-product rows, never a new unscoped query.
+
+### Agent permissions, reaffirmed — M9 introduces no new agent at all
+
+Unlike every prior milestone, M9 adds no new agent ROLE — the CEO and
+Chairman entry points this milestone extends
+(`recommendCompanyAction`/`reviewCompanyAction`) run under the same
+identities M4's own CEO/Chairman axes already created. `PERMISSIONS`
+gains zero new entries; `tests/integration/m9-security.test.ts` proves
+this directly by confirming a CEO agent holding zero active grants for
+any permission in the system still completes a real company-level
+recommendation.
+
+### Verification table — every claim above has a passing test
+
+| Claim | Test |
+| --- | --- |
+| No M9 agent role exists; the CEO/Chairman entry points hold zero Guardian permissions | `tests/integration/m9-security.test.ts` |
+| Emergency Stop fails closed and blocks a real EXECUTE call; a resumed stop lets the same approved plan execute again | `tests/integration/m9-security.test.ts` |
+| A resource changed out-of-band after approval is refused at EXECUTE time (`StaleApprovalError`) | `tests/integration/m9-security.test.ts` |
+| An oversized real spend actually stops a RUNNING cycle and raises a real alert | `tests/integration/m9-security.test.ts` |
+| A concurrency conflict is flagged, never blocked — both recommendations remain visible | `tests/integration/m9-security.test.ts` |
+| OperatingCycle pause/cancel and CompanyRecommendation decisions reject an AGENT actor at the service layer | `tests/integration/m9-security.test.ts` |
+| Every new M9 HTTP route enforces `requireAuth()`/`requireHuman()` — a 401/403 for real, not by convention | `tests/integration/api-m9.test.ts` |
+| A full operating cycle reaches COMPLETED only after a real, recorded human decision — never a fabricated shortcut | `tests/integration/m9-capstone-operating-cycle.test.ts` |
+| A CEO/Chairman conflict (GROW vs. REJECT) resolves to CONFLICTED and blocks execution until a human decides | `tests/integration/m9-capstone-conflict.test.ts` |
+| `hashBillingPlan`'s own type signature makes the real status-hashing regression structurally impossible | `tests/unit/m9-approval-staleness.test.ts` |
+| `resolveCeoChairmanConflict`/`isConflictingAction` are exhaustive over every real action pair | `tests/unit/m9-company-action.test.ts` |
+| `computeFounderAttentionScore`'s nine weights sum to exactly 1.0; out-of-range factors throw rather than silently clamp | `tests/unit/m9-attention-score.test.ts` |
+| `briefingContentSchema` structurally refuses a statement with no cited evidence | `tests/unit/m9-briefing-schema.test.ts` |
+
+### Dependency posture (M9)
+
+**Zero new production dependencies** — `computeResourceStateHash`
+reuses `node:crypto` exactly as `webhook-security.ts` (M7) already
+does; every other M9 capability reuses VentureForge's own
+already-installed `express`/`zod`/`@prisma/client`/`vitest`/`typescript`.
+`npm audit --omit=dev` reports the same pre-existing advisories prior
+milestones already documented — unchanged by M9, not newly introduced.

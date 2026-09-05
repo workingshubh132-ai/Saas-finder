@@ -76,7 +76,9 @@ export const businessReviewMemoService = {
       result: "SUCCESS",
       metadata: { memoId: memo.id, chairmanDecision: params.chairmanReview.decision, ceoAction: params.ceoRecommendation.action },
     });
-    await eventBus.publish({ type: "LAUNCH_REVIEW_MEMO_CREATED", payload: { memoId: memo.id, productId: params.productId } });
+    // Was mis-published as "LAUNCH_REVIEW_MEMO_CREATED" (a copy-paste from launch-review-memo.service.ts) —
+    // caught and fixed by the M9 audit (docs/M9_ARCHITECTURE_PROPOSAL.md §8, docs/DECISIONS.md).
+    await eventBus.publish({ type: "BUSINESS_REVIEW_MEMO_CREATED", payload: { memoId: memo.id, productId: params.productId } });
 
     return memo;
   },
@@ -129,6 +131,8 @@ export const businessReviewMemoService = {
       result: "SUCCESS",
       metadata: { memoId: memo.id, humanReason: params.humanReason },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — the one cross-milestone event decisionQueueService's own unification (§19) makes real at the event layer.
+    await eventBus.publish({ type: "HUMAN_DECISION_MADE", payload: { source: "BUSINESS_REVIEW_MEMO", memoId: updated.id, decision: params.humanDecision } });
 
     return updated;
   },

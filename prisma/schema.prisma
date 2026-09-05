@@ -181,6 +181,9 @@ model ApprovalRequest {
   /// M8 — docs/M8_ARCHITECTURE_PROPOSAL.md §25-26. One ApprovalRequest ever binds to one exact GrowthExperiment (resourceType="GROWTH_EXPERIMENT").
   growthExperiments GrowthExperiment[]
 
+  /// M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §39, §55. A resource-state hash captured at request time, for change detection at EXECUTE time.
+  approvalSnapshot ApprovalSnapshot?
+
   @@index([status])
   @@index([resourceType, resourceId])
   @@map("approval_requests")
@@ -290,6 +293,9 @@ model Opportunity {
 
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34. One row per build attempt (§3).
   products Product[]
+
+  /// M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §55.
+  targetOfCompanyRecommendations CompanyRecommendation[]
 
   @@index([status])
   @@index([problemId])
@@ -452,6 +458,9 @@ model Identity {
   customerResponsesEntered   CustomerResponse[]
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34.
   productsCreated            Product[]
+
+  /// M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §55.
+  operatingCyclesStarted OperatingCycle[]
 
   @@index([agentId])
   @@index([status])
@@ -1548,6 +1557,10 @@ model Product {
   predictionOutcomes    PredictionOutcome[]
   businessReviewMemos   BusinessReviewMemo[]
 
+  /// M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §55.
+  resourceAllocations            ResourceAllocation[]
+  targetOfCompanyRecommendations CompanyRecommendation[]
+
   @@index([status])
   @@map("products")
 }
@@ -2314,8 +2327,8 @@ model GrowthExperiment {
   failureCriteria         String @map("failure_criteria")
   estimatedCostUsd        Float  @map("estimated_cost_usd")
   /// LOW | MEDIUM | HIGH — free classification for human review, not a Guardian RiskLevel.
-  riskLevel                String @map("risk_level")
-  durationDays             Int    @map("duration_days")
+  riskLevel               String @map("risk_level")
+  durationDays            Int    @map("duration_days")
 
   /// DRAFT -> ANALYZED -> AWAITING_APPROVAL -> APPROVED -> RUNNING -> COMPLETED -> ANALYZED (§26).
   status String @default("DRAFT")
@@ -2370,20 +2383,20 @@ model BusinessHealth {
   productId String  @map("product_id")
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  productHealth     Float @map("product_health")
-  customerHealth    Float @map("customer_health")
-  revenueHealth     Float @map("revenue_health")
-  growthHealth      Float @map("growth_health")
-  marginHealth      Float @map("margin_health")
-  operationalHealth Float @map("operational_health")
-  risk              Float
+  productHealth      Float @map("product_health")
+  customerHealth     Float @map("customer_health")
+  revenueHealth      Float @map("revenue_health")
+  growthHealth       Float @map("growth_health")
+  marginHealth       Float @map("margin_health")
+  operationalHealth  Float @map("operational_health")
+  risk               Float
   evidenceConfidence Float @map("evidence_confidence")
 
-  compositeScore Float @map("composite_score")
+  compositeScore Float  @map("composite_score")
   /// One of BUSINESS_HEALTH_STATES.
-  state String
+  state          String
   /// JSON-encoded string[] — the explicit, named threshold(s) that produced this state.
-  reasons String
+  reasons        String
 
   computedAt DateTime @default(now()) @map("computed_at")
 
@@ -2407,12 +2420,12 @@ model PortfolioSnapshot {
   runId String @map("run_id")
 
   revenueUsd         Float @map("revenue_usd")
-  growthRatePct       Float @map("growth_rate_pct")
-  retentionPct        Float @map("retention_pct")
-  marginPct           Float @map("margin_pct")
-  evidenceConfidence  Float @map("evidence_confidence")
-  killRiskScore       Float @map("kill_risk_score")
-  priorityScore       Float @map("priority_score")
+  growthRatePct      Float @map("growth_rate_pct")
+  retentionPct       Float @map("retention_pct")
+  marginPct          Float @map("margin_pct")
+  evidenceConfidence Float @map("evidence_confidence")
+  killRiskScore      Float @map("kill_risk_score")
+  priorityScore      Float @map("priority_score")
 
   /// One of PORTFOLIO_RECOMMENDATIONS — Constitution §19's own literal vocabulary.
   recommendation String
@@ -2487,6 +2500,9 @@ model LearningRecord {
 
   createdAt DateTime @default(now()) @map("created_at")
 
+  /// M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §27, §55.
+  decisionOutcomes DecisionOutcome[]
+
   @@map("learning_records")
 }
 
@@ -2523,4 +2539,364 @@ model BusinessReviewMemo {
 
   @@index([productId])
   @@map("business_review_memos")
+}
+
+// ---------------------------------------------------------------------------
+// M9 — Company Control Plane & Operating System
+// (docs/M9_ARCHITECTURE_PROPOSAL.md)
+// ---------------------------------------------------------------------------
+
+/// Company-level operating cycle (§15) — two independent axes: `status`
+/// reuses CYCLE_STATUSES/CYCLE_STATUS_TRANSITIONS (src/domain/shared/
+/// cycle-lifecycle.ts) verbatim, the THIRD consumer of that shared
+/// module after ResearchCycle/DecisionCycle; `stage` is this
+/// milestone's own genuinely new concept (CREATED..COMPLETED). Never a
+/// while(true) loop — every advance is one bounded, externally-invoked
+/// call (§17).
+model OperatingCycle {
+  id String @id @default(cuid())
+
+  objective String
+  scope     String
+  status    String @default("SCHEDULED")
+  stage     String @default("CREATED")
+  /// SCHEDULED | MANUAL | RESUMED | RETRIED (CYCLE_KINDS).
+  kind      String @default("MANUAL")
+
+  maxCostUsd Float     @map("max_cost_usd")
+  riskLevel  String    @map("risk_level")
+  deadline   DateTime? @map("deadline")
+  owner      String
+
+  consumedCostUsd Float   @default(0) @map("consumed_cost_usd")
+  stoppedReason   String? @map("stopped_reason")
+
+  /// A second call with the same key returns the existing cycle (§41) — mirrors claimExtractionService's own idempotent-return precedent.
+  idempotencyKey String? @unique @map("idempotency_key")
+
+  /// Self-relation: set when this row is a RETRIED cycle's own fresh continuation of an earlier FAILED one (§17, mirrors Deployment.rolledBackFromId's own append-only-retry precedent).
+  retriedFromCycleId String?          @map("retried_from_cycle_id")
+  retriedFromCycle   OperatingCycle?  @relation("CycleRetry", fields: [retriedFromCycleId], references: [id], onDelete: SetNull)
+  retries            OperatingCycle[] @relation("CycleRetry")
+
+  startedByIdentityId String   @map("started_by_identity_id")
+  startedByIdentity   Identity @relation(fields: [startedByIdentityId], references: [id], onDelete: Restrict)
+
+  scheduledFor DateTime? @map("scheduled_for")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  startedAt    DateTime? @map("started_at")
+  completedAt  DateTime? @map("completed_at")
+
+  stageEvents            CycleStageEvent[]
+  companyRecommendations CompanyRecommendation[]
+
+  @@index([status])
+  @@index([stage])
+  @@map("operating_cycles")
+}
+
+/// One row per stage the cycle has entered (§15) — what makes
+/// Observability (§56) and the Company Timeline (§43) able to show
+/// "current cycle, current stage" without inferring it from log lines.
+/// Never mutated after completedAt is set — a fresh advance is a fresh row.
+model CycleStageEvent {
+  id String @id @default(cuid())
+
+  cycleId String         @map("cycle_id")
+  cycle   OperatingCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+
+  stage String
+
+  enteredAt   DateTime  @default(now()) @map("entered_at")
+  completedAt DateTime? @map("completed_at")
+  summary     String?
+
+  @@index([cycleId])
+  @@map("cycle_stage_events")
+}
+
+/// The CEO's sixth, company-level entry point's own recommendation row
+/// (§31-32, §55) — deliberately NOT a CeoRecommendation: that table's
+/// own opportunityId FK is required, a structural assumption ("every
+/// CEO decision is about exactly one opportunity") every axis before
+/// this one shares and this one is the first to break (a company-level
+/// recommendation may target zero, one, or conceptually the whole
+/// portfolio). Carries its own human-decision fields directly — no
+/// separate memo table, since there is no rich multi-field content to
+/// compile beyond what this row and its own CompanyReview already have.
+model CompanyRecommendation {
+  id String @id @default(cuid())
+
+  /// One of COMPANY_ACTIONS.
+  action    String
+  reasoning String
+
+  targetOpportunityId String?      @map("target_opportunity_id")
+  targetOpportunity   Opportunity? @relation(fields: [targetOpportunityId], references: [id], onDelete: SetNull)
+
+  targetProductId String?  @map("target_product_id")
+  targetProduct   Product? @relation(fields: [targetProductId], references: [id], onDelete: SetNull)
+
+  /// JSON-encoded string[] of claim/metric/opportunity/product ids this recommendation cites.
+  citedResourceIds String @map("cited_resource_ids")
+  confidence       Float
+
+  operatingCycleId String?         @map("operating_cycle_id")
+  operatingCycle   OperatingCycle? @relation(fields: [operatingCycleId], references: [id], onDelete: SetNull)
+
+  /// CONFLICTED when resolveCeoChairmanConflict (§34) found a real disagreement — null until the matching CompanyReview exists.
+  conflictResolution String? @map("conflict_resolution")
+
+  /// One of BUSINESS_REVIEW_HUMAN_DECISIONS (reused directly — same shape); null until the Human Owner decides.
+  humanDecision       String?   @map("human_decision")
+  humanReason         String?   @map("human_reason")
+  decidedAt           DateTime? @map("decided_at")
+  decidedByIdentityId String?   @map("decided_by_identity_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  companyReviews CompanyReview[]
+
+  @@index([targetOpportunityId])
+  @@index([targetProductId])
+  @@map("company_recommendations")
+}
+
+/// The Chairman's fifth, company-level entry point's own review row
+/// (§33, §55) — mirrors ChairmanReview's own shape exactly (decision/
+/// reasoning/objections/missingEvidence/confidence/recommendation),
+/// scoped to a CompanyRecommendation instead of an Opportunity for the
+/// same reason CompanyRecommendation itself is a new table.
+model CompanyReview {
+  id String @id @default(cuid())
+
+  companyRecommendationId String                @map("company_recommendation_id")
+  companyRecommendation   CompanyRecommendation @relation(fields: [companyRecommendationId], references: [id], onDelete: Cascade)
+
+  /// One of CHAIRMAN_DECISIONS (reused directly).
+  decision String
+
+  reasoning       String
+  /// JSON-encoded string[].
+  objections      String
+  missingEvidence String @map("missing_evidence")
+  confidence      Float
+  recommendation  String
+
+  modelProvider String @map("model_provider")
+  modelName     String @map("model_name")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([companyRecommendationId])
+  @@map("company_reviews")
+}
+
+/// Founder Attention Score items (§18) — every underlying factor is
+/// stored, not just the composite score (M9 brief §6's own explicit
+/// "do not reduce everything to a single unexplained magic number").
+model FounderAttentionItem {
+  id String @id @default(cuid())
+
+  resourceType String @map("resource_type")
+  resourceId   String @map("resource_id")
+
+  /// APPROVAL_REQUEST | MEMO | COMPANY_RECOMMENDATION (DecisionQueueSourceKind).
+  sourceKind String @map("source_kind")
+  source     String
+
+  score   Float
+  /// JSON-encoded FounderAttentionFactors — the nine stored factors this score was computed from.
+  factors String
+
+  summary String
+
+  createdAt  DateTime  @default(now()) @map("created_at")
+  /// Set once a human actually opens this item via the Founder Cockpit — feeds operatingEfficiencyService's own "founder attention actually reviewed" metric (§49).
+  reviewedAt DateTime? @map("reviewed_at")
+
+  @@index([resourceType, resourceId])
+  @@index([score])
+  @@map("founder_attention_items")
+}
+
+/// Company-level cost ceiling (§50) — a ROLLUP check above the three
+/// existing ceilings (AgentExecution's own budget, ResearchCycle/
+/// DecisionCycle's own maxCostUsd, M7's checkLaunchBudget), never a
+/// fourth independent one. One row per period.
+model CompanyBudget {
+  id String @id @default(cuid())
+
+  period      String @unique
+  ceilingUsd  Float  @map("ceiling_usd")
+  consumedUsd Float  @default(0) @map("consumed_usd")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("company_budgets")
+}
+
+/// Resource Allocation (§23) — the brief's own five categories,
+/// historized like OpportunityScoreRecord/BusinessHealth (a re-run is
+/// a new row, never an edit) rather than upserted, since `consumed`
+/// changes continuously within a period. Units are an abstract,
+/// per-category-documented count — NEVER a currency amount (no real
+/// financial data exists in this system to allocate).
+model ResourceAllocation {
+  id String @id @default(cuid())
+
+  /// One of RESOURCE_CATEGORIES.
+  category String
+  period   String
+
+  productId String?  @map("product_id")
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  allocated Float
+  consumed  Float
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([category, period])
+  @@index([productId])
+  @@map("resource_allocations")
+}
+
+/// Company Alerts (§35) — every source is a REAL, already-existing
+/// event or computed condition (an Anomaly, an Incident, a
+/// BusinessHealth state transition, a provider failure, a budget
+/// ceiling) — never a new detector. Deduplicated: two alerts for the
+/// same (alertType, resourceType, resourceId) within ALERT_DEDUP_WINDOW_MS
+/// collapse into one, incrementing occurrenceCount rather than
+/// creating a new row.
+model Alert {
+  id String @id @default(cuid())
+
+  /// One of ALERT_TYPES.
+  alertType String @map("alert_type")
+  /// One of ALERT_SEVERITIES.
+  severity  String
+
+  resourceType String @map("resource_type")
+  resourceId   String @map("resource_id")
+
+  message String
+  /// The same computeFounderAttentionScore output — an alert is just another kind of attention item, no second ranking system.
+  score   Float
+
+  occurrenceCount Int @default(1) @map("occurrence_count")
+
+  firstSeenAt DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at")
+
+  acknowledgedAt           DateTime? @map("acknowledged_at")
+  acknowledgedByIdentityId String?   @map("acknowledged_by_identity_id")
+
+  @@index([resourceType, resourceId])
+  @@index([alertType])
+  @@index([score])
+  @@map("alerts")
+}
+
+/// Weekend Briefing (§46) — the brief's own eleven-section structure
+/// (BRIEFING_SECTIONS), each statement Zod-required to cite real ids
+/// (briefingContentSchema) so a section literally cannot be
+/// constructed with unbacked prose. `status` is ACTION_REQUIRED or the
+/// equally valid NO_ACTION_REQUIRED (M9 brief §36 — never manufactured
+/// to look productive).
+model Briefing {
+  id String @id @default(cuid())
+
+  generatedAt DateTime @default(now()) @map("generated_at")
+  periodStart DateTime @map("period_start")
+  periodEnd   DateTime @map("period_end")
+
+  /// JSON-encoded BriefingContent (every §-named section + status).
+  content String
+  status  String
+
+  /// JSON-encoded snapshot of the Decision Queue at generation time, so a later briefing can diff "what happened since" without recomputing history.
+  decisionQueueSnapshot String @map("decision_queue_snapshot")
+
+  @@index([generatedAt])
+  @@map("briefings")
+}
+
+/// Decision Memory's own outcome half (§27) — genuinely new: nothing
+/// in M1-M8 records "what we expected" against "what actually
+/// happened" at the DECISION level (as opposed to PredictionOutcome's
+/// own narrower METRIC-level tracking, which this reuses as its own
+/// evidentiary backing where the decision was metric-shaped).
+model DecisionOutcome {
+  id String @id @default(cuid())
+
+  /// One of MEMO_QUEUE_SOURCES, or "COMPANY_RECOMMENDATION".
+  decisionType       String @map("decision_type")
+  decisionResourceId String @map("decision_resource_id")
+
+  expectedMetricType String? @map("expected_metric_type")
+  expectedValue      Float?  @map("expected_value")
+
+  actualValue Float?    @map("actual_value")
+  evaluatedAt DateTime? @map("evaluated_at")
+
+  learningRecordId String?         @map("learning_record_id")
+  learningRecord   LearningRecord? @relation(fields: [learningRecordId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([decisionType, decisionResourceId])
+  @@map("decision_outcomes")
+}
+
+/// Change detection's own state (§39) — a resource-state hash captured
+/// at ApprovalRequest creation time, compared against the current
+/// resource at EXECUTE time. Every ApprovalRequest created before this
+/// mechanism existed (every M5/M7/M8 call site) simply has none —
+/// never treated as a mismatch, since there is nothing to compare.
+model ApprovalSnapshot {
+  id String @id @default(cuid())
+
+  approvalRequestId String          @unique @map("approval_request_id")
+  approvalRequest   ApprovalRequest @relation(fields: [approvalRequestId], references: [id], onDelete: Cascade)
+
+  resourceType String @map("resource_type")
+  resourceId   String @map("resource_id")
+  stateHash    String @map("state_hash")
+
+  capturedAt DateTime @default(now()) @map("captured_at")
+
+  @@map("approval_snapshots")
+}
+
+/// Company-wide kill switch (§57) — the simplest correct model: always
+/// query the latest row ordered by activatedAt desc; `resumedAt IS NULL`
+/// means the stop is currently active. Checked at exactly one place —
+/// every stage-advance call and every EXECUTE step — never anywhere
+/// read-only. Fails closed: an error checking this table's own state is
+/// treated as "the stop is active."
+model EmergencyStop {
+  id String @id @default(cuid())
+
+  activatedAt           DateTime  @default(now()) @map("activated_at")
+  activatedByIdentityId String    @map("activated_by_identity_id")
+  resumedAt             DateTime? @map("resumed_at")
+  resumedByIdentityId   String?   @map("resumed_by_identity_id")
+
+  @@index([resumedAt])
+  @@map("emergency_stops")
+}
+
+/// One row per Founder Cockpit view (§44) — historized, not upserted;
+/// the service reads MAX(viewedAt) as "lastViewedAt" for the Timeline's
+/// own "what happened since my last review" filter.
+model FounderCockpitView {
+  id String @id @default(cuid())
+
+  viewedAt           DateTime @default(now()) @map("viewed_at")
+  viewedByIdentityId String   @map("viewed_by_identity_id")
+
+  @@index([viewedAt])
+  @@map("founder_cockpit_views")
 }

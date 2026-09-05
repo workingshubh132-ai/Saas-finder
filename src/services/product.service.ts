@@ -44,6 +44,8 @@ export const productService = {
       result: "SUCCESS",
       metadata: { opportunityId: params.opportunityId },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — genuinely distinct from PRODUCT_APPROVED, which fires later on human approval.
+    await eventBus.publish({ type: "PRODUCT_CREATED", payload: { productId: product.id, opportunityId: params.opportunityId } });
 
     return product;
   },

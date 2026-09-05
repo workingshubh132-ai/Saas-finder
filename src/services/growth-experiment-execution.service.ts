@@ -1,11 +1,14 @@
 import type { GrowthExperiment, GrowthExperimentResult } from "@prisma/client";
 import { growthExperimentRepository } from "../db/repositories/growth-experiment.repository.js";
 import { growthExperimentResultRepository } from "../db/repositories/growth-experiment-result.repository.js";
+import { hashGrowthExperiment } from "../domain/approval/resource-snapshot.js";
 import { MIN_EXPERIMENT_SAMPLE } from "../domain/growth-experiment/growth-experiment.types.js";
 import { ValidationError } from "../domain/shared/errors.js";
 import { assertHumanActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
+import { emergencyStopService } from "./emergency-stop.service.js";
+import { eventBus } from "./event-bus.js";
 import { growthExperimentService } from "./growth-experiment.service.js";
 
 export interface ApproveToRunParams {
@@ -34,6 +37,8 @@ export interface CompleteExperimentParams {
 export const growthExperimentExecutionService = {
   async approveToRun(params: ApproveToRunParams): Promise<GrowthExperiment> {
     assertHumanActor(params.actor);
+    // Fails closed (docs/M9_ARCHITECTURE_PROPOSAL.md §57) — checked at every EXECUTE step, alongside the staleness check below.
+    await emergencyStopService.assertNotActive();
 
     const experiment = await growthExperimentService.getOrThrow(params.growthExperimentId);
     if (experiment.status !== "APPROVED") {
@@ -46,6 +51,8 @@ export const growthExperimentExecutionService = {
     if (approvalRequest.status !== "APPROVED" || approvalRequest.resourceId !== experiment.id) {
       throw new ValidationError(`ApprovalRequest ${approvalRequest.id} is not an APPROVED decision bound to exactly this experiment.`);
     }
+    // Change detection + approval expiration (docs/M9_ARCHITECTURE_PROPOSAL.md §38-39) — the start of every EXECUTE step.
+    await approvalService.assertFresh(approvalRequest, hashGrowthExperiment(experiment));
 
     const updated = await growthExperimentRepository.markStarted(experiment.id);
 
@@ -58,6 +65,8 @@ export const growthExperimentExecutionService = {
       result: "SUCCESS",
       metadata: { approvalRequestId: approvalRequest.id },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — the generic EXECUTE-step event, alongside GROWTH_EXPERIMENT-specific tracking, never replacing it.
+    await eventBus.publish({ type: "ACTION_EXECUTED", payload: { action: "RUN_EXPERIMENT", resourceType: "GROWTH_EXPERIMENT", resourceId: experiment.id, status: "RUNNING" } });
 
     return updated;
   },
@@ -101,6 +110,8 @@ export const growthExperimentExecutionService = {
       result: "SUCCESS",
       metadata: { resultId: result.id, observedChangePct, confidence, sampleSize: params.sampleSize },
     });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §8, §42 — no M8 event fired here before this fix.
+    await eventBus.publish({ type: "GROWTH_EXPERIMENT_COMPLETED", payload: { growthExperimentId: experiment.id, resultId: result.id, decision } });
 
     return { experiment: updated, result };
   },

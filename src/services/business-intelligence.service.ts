@@ -4,6 +4,7 @@ import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
 import { deriveBusinessHealth, type BusinessHealthDimensions } from "../domain/business-health/business-health.types.js";
 import { ValidationError } from "../domain/shared/errors.js";
 import { toJsonString } from "../domain/shared/json.js";
+import { alertService } from "./alert.service.js";
 import { auditService } from "./audit.service.js";
 import { businessClaimExtractionService } from "./business-claim-extraction.service.js";
 import { businessReviewMemoService } from "./business-review-memo.service.js";
@@ -155,6 +156,7 @@ export const businessIntelligenceService = {
 
     const dimensions: BusinessHealthDimensions = { productHealth, customerHealth, revenueHealth, growthHealth, marginHealth, operationalHealth, risk, evidenceConfidence };
 
+    const priorHealth = await businessHealthRepository.findLatestForProduct(product.id);
     const healthResult = deriveBusinessHealth(dimensions);
     const businessHealth = await businessHealthRepository.create({
       productId: product.id,
@@ -170,6 +172,19 @@ export const businessIntelligenceService = {
       state: healthResult.state,
       reasons: toJsonString(healthResult.reasons),
     });
+
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §35 — BusinessHealth.state TRANSITIONING to CRITICAL/DECLINING between two
+    // consecutive computations, not merely "is currently" CRITICAL/DECLINING (that would re-alert every single run).
+    const declinedInto = (healthResult.state === "CRITICAL" || healthResult.state === "DECLINING") && priorHealth?.state !== healthResult.state;
+    if (declinedInto) {
+      await alertService.raise({
+        alertType: "BUSINESS_HEALTH_DECLINED",
+        severity: healthResult.state === "CRITICAL" ? "CRITICAL" : "WARNING",
+        resourceType: "PRODUCT",
+        resourceId: product.id,
+        message: `BusinessHealth transitioned ${priorHealth ? `from ${priorHealth.state} ` : ""}to ${healthResult.state} (composite score ${healthResult.compositeScore.toFixed(2)}).`,
+      });
+    }
 
     const ceoOutcome = await ceoReasoningService.recommendBusinessAction({ agentId: params.ceoAgentId, productId: product.id, startedBy: params.startedBy });
     if (ceoOutcome.status !== "COMPLETED") return fail("CEO business-action recommendation did not complete.");

@@ -45,4 +45,9 @@ export const agentExecutionRepository = {
       orderBy: { createdAt: "desc" },
     });
   },
+
+  /** The company budget rollup's own read (docs/M9_ARCHITECTURE_PROPOSAL.md §50) — every execution created within the current period. */
+  listCreatedSince(since: Date): Promise<AgentExecution[]> {
+    return prisma.agentExecution.findMany({ where: { createdAt: { gte: since } } });
+  },
 };

@@ -39,4 +39,9 @@ export const predictionOutcomeRepository = {
   listForProduct(productId: string): Promise<PredictionOutcome[]> {
     return prisma.predictionOutcome.findMany({ where: { productId }, orderBy: { predictedAt: "desc" } });
   },
+
+  /** Every resolved outcome (docs/M9_ARCHITECTURE_PROPOSAL.md §29's own prediction-accuracy axis) — grouping by predictionSource happens in application code, not SQL, matching this codebase's existing dev-fixture scale. */
+  listResolved(): Promise<PredictionOutcome[]> {
+    return prisma.predictionOutcome.findMany({ where: { observedValue: { not: null } }, orderBy: { resolvedAt: "desc" } });
+  },
 };

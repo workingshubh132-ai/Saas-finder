@@ -15,6 +15,10 @@ export const learningRecordRepository = {
     return prisma.learningRecord.create({ data: input });
   },
 
+  findById(id: string): Promise<LearningRecord | null> {
+    return prisma.learningRecord.findUnique({ where: { id } });
+  },
+
   list(): Promise<LearningRecord[]> {
     return prisma.learningRecord.findMany({ orderBy: { createdAt: "desc" } });
   },

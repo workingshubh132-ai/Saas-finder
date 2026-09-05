@@ -1,5 +1,6 @@
 import type { ApprovalRequest, DeploymentPlan } from "@prisma/client";
 import { deploymentPlanRepository } from "../db/repositories/deployment-plan.repository.js";
+import { hashDeploymentPlan } from "../domain/approval/resource-snapshot.js";
 import { DEPLOYMENT_PLAN_STATUS_TRANSITIONS, isDeploymentPlanStatus } from "../domain/deployment-plan/deployment-plan.types.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
@@ -55,6 +56,7 @@ export const deploymentPlanService = {
       resourceType: "DEPLOYMENT_PLAN",
       resourceId: plan.id,
       reason: plan.strategy,
+      resourceStateHash: hashDeploymentPlan(plan),
     });
 
     await deploymentPlanRepository.attachApprovalRequest(plan.id, approvalRequest.id);

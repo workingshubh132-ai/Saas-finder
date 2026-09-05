@@ -1,6 +1,7 @@
 import type { ApprovalRequest, BillingPlan } from "@prisma/client";
 import { billingPlanRepository } from "../db/repositories/billing-plan.repository.js";
 import { pricingModelRepository } from "../db/repositories/pricing-model.repository.js";
+import { hashBillingPlan } from "../domain/approval/resource-snapshot.js";
 import { BILLING_PLAN_STATUS_TRANSITIONS, isBillingPlanStatus } from "../domain/billing-plan/billing-plan.types.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
@@ -69,6 +70,7 @@ export const billingPlanService = {
       riskLevel: "RED",
       resourceType: "BILLING_PLAN",
       resourceId: plan.id,
+      resourceStateHash: hashBillingPlan(plan),
     });
 
     await billingPlanRepository.attachApprovalRequest(plan.id, approvalRequest.id);

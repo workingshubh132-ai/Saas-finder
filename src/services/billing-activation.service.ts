@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { BillingAccount } from "@prisma/client";
 import { billingAccountRepository } from "../db/repositories/billing-account.repository.js";
 import { pricingModelRepository } from "../db/repositories/pricing-model.repository.js";
+import { hashBillingPlan } from "../domain/approval/resource-snapshot.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString } from "../domain/shared/json.js";
 import { createBillingProvider } from "../providers/billing-provider-factory.js";
@@ -9,6 +10,7 @@ import { assertHumanActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 import { billingPlanService } from "./billing-plan.service.js";
+import { emergencyStopService } from "./emergency-stop.service.js";
 import { eventBus } from "./event-bus.js";
 
 export interface ActivateBillingParams {
@@ -32,6 +34,8 @@ interface PricingTier {
 export const billingActivationService = {
   async activate(params: ActivateBillingParams): Promise<BillingAccount> {
     assertHumanActor(params.actor);
+    // Fails closed (docs/M9_ARCHITECTURE_PROPOSAL.md §57) — checked at every EXECUTE step, alongside the staleness check below.
+    await emergencyStopService.assertNotActive();
 
     const plan = await billingPlanService.getOrThrow(params.billingPlanId);
     if (plan.status !== "HUMAN_APPROVED") {
@@ -44,6 +48,8 @@ export const billingActivationService = {
     if (approvalRequest.status !== "APPROVED" || approvalRequest.resourceType !== "BILLING_PLAN" || approvalRequest.resourceId !== plan.id) {
       throw new NotFoundError("Approved ApprovalRequest for BillingPlan", plan.id);
     }
+    // Change detection + approval expiration (docs/M9_ARCHITECTURE_PROPOSAL.md §38-39) — the start of every EXECUTE step.
+    await approvalService.assertFresh(approvalRequest, hashBillingPlan(plan));
 
     const pricingModel = await pricingModelRepository.findById(plan.pricingModelId);
     if (!pricingModel) throw new NotFoundError("PricingModel", plan.pricingModelId);
@@ -78,6 +84,8 @@ export const billingActivationService = {
       metadata: { billingAccountId: billingAccount.id, providerProductRef, providerPriceRef, provider: provider.id },
     });
     await eventBus.publish({ type: "BILLING_ACTIVATED", payload: { billingPlanId: plan.id, billingAccountId: billingAccount.id, productId: plan.productId, provider: provider.id } });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — the generic EXECUTE-step event, alongside BILLING_ACTIVATED, never replacing it.
+    await eventBus.publish({ type: "ACTION_EXECUTED", payload: { action: "ACTIVATE_BILLING", resourceType: "BILLING_PLAN", resourceId: plan.id, status: "ACTIVATED" } });
 
     return billingAccount;
   },

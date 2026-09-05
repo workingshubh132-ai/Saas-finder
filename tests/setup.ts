@@ -95,6 +95,31 @@ async function resetDatabase(): Promise<void> {
   // claimEvidence/validationReport reference claim (validationReport's FK is
   // Restrict, so it must precede claim); investmentMemo references
   // ceoRecommendation/chairmanReview (Restrict) so it precedes both.
+  // M9 leaf tables first (FK-safe order — docs/M9_ARCHITECTURE_PROPOSAL.md
+  // §55): cycleStageEvent/companyReview reference operatingCycle/
+  // companyRecommendation (Cascade) so they precede both; operatingCycle
+  // itself has a Restrict FK to identity (startedByIdentityId), so it
+  // must be gone before identity.deleteMany() below — this whole block
+  // was missing from the original M1-M8 resetDatabase (a real gap this
+  // build's own m9-security.test.ts caught: without it, any test
+  // creating an OperatingCycle broke every later test's identity
+  // bootstrap with a foreign-key violation). The rest (founderAttentionItem/
+  // companyBudget/resourceAllocation/alert/briefing/decisionOutcome/
+  // emergencyStop/founderCockpitView) carry no Restrict FKs, so order
+  // among them doesn't matter — grouped here for readability.
+  await prisma.cycleStageEvent.deleteMany();
+  await prisma.companyReview.deleteMany();
+  await prisma.companyRecommendation.deleteMany();
+  await prisma.operatingCycle.deleteMany();
+  await prisma.founderAttentionItem.deleteMany();
+  await prisma.companyBudget.deleteMany();
+  await prisma.resourceAllocation.deleteMany();
+  await prisma.alert.deleteMany();
+  await prisma.briefing.deleteMany();
+  await prisma.decisionOutcome.deleteMany();
+  await prisma.emergencyStop.deleteMany();
+  await prisma.founderCockpitView.deleteMany();
+  await prisma.approvalSnapshot.deleteMany();
   await prisma.decisionRecord.deleteMany();
   // M8 tables with Restrict FKs to claim/ceoRecommendation/chairmanReview
   // (docs/M8_ARCHITECTURE_PROPOSAL.md §32) — must precede all three below.

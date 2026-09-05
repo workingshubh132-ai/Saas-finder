@@ -66,6 +66,29 @@ export const DOMAIN_EVENT_TYPES = [
   "INCIDENT_DETECTED",
   "INCIDENT_RESOLVED",
   "SUPPORT_CASE_CREATED",
+  // M8 catch-up (docs/M9_ARCHITECTURE_PROPOSAL.md §8, §42) — DOMAIN_EVENT_TYPES
+  // was never actually widened for M8; these four capabilities had no
+  // corresponding event anywhere in the system until this fix.
+  "BUSINESS_REVIEW_MEMO_CREATED",
+  "GROWTH_EXPERIMENT_COMPLETED",
+  "ANOMALY_DETECTED",
+  "PORTFOLIO_ANALYZED",
+  // M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §42. Reuses an existing name
+  // wherever one already fits (OPPORTUNITY_DISCOVERED, PRODUCT_DEPLOYED
+  // as PRODUCT_LAUNCHED, CEO_RECOMMENDATION_ISSUED) rather than adding a
+  // duplicate — only genuinely new moments are listed here.
+  "CUSTOMER_VALIDATED",
+  "PRODUCT_CREATED",
+  "REVENUE_OBSERVED",
+  "CHAIRMAN_REVIEW_COMPLETED",
+  "HUMAN_DECISION_MADE",
+  "ACTION_EXECUTED",
+  "OUTCOME_OBSERVED",
+  "LESSON_CREATED",
+  "OPERATING_CYCLE_STAGE_ADVANCED",
+  "ATTENTION_QUEUE_UPDATED",
+  "EMERGENCY_STOP_ACTIVATED",
+  "EMERGENCY_STOP_RESUMED",
 ] as const;
 export type DomainEventType = (typeof DOMAIN_EVENT_TYPES)[number];
 

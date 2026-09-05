@@ -1,11 +1,14 @@
 import type { ApprovalRequest } from "@prisma/client";
 import { approvalRepository } from "../db/repositories/approval.repository.js";
+import { approvalSnapshotRepository } from "../db/repositories/approval-snapshot.repository.js";
 import { APPROVAL_STATUS_TRANSITIONS, isApprovalStatus } from "../domain/approval/approval.types.js";
+import { checkApprovalFreshness, DEFAULT_APPROVAL_EXPIRY_DAYS } from "../domain/approval/staleness.js";
 import { isRiskLevel } from "../domain/risk/risk-level.js";
-import { NotFoundError, SelfApprovalError, ValidationError } from "../domain/shared/errors.js";
+import { NotFoundError, SelfApprovalError, StaleApprovalError, ValidationError } from "../domain/shared/errors.js";
 import { toJsonString } from "../domain/shared/json.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
 import { agentService, assertHumanActor, type Actor } from "./agent.service.js";
+import { alertService } from "./alert.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
 
@@ -19,6 +22,8 @@ export interface RequestApprovalParams {
   evidenceIds?: string[];
   reason?: string | null;
   expiresAt?: Date | null;
+  /** Change detection's own capture point (docs/M9_ARCHITECTURE_PROPOSAL.md §39) — a deterministic hash over the resource's own consequential fields at request time. Optional, backward compatible with every pre-M9 call site. */
+  resourceStateHash?: string | null;
 }
 
 export interface DecideParams {
@@ -44,6 +49,10 @@ export const approvalService = {
     }
     await agentService.getAgentOrThrow(params.requestedByAgentId);
 
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §38 — an approval with no expiry is indistinguishable from a stale one a
+    // human forgot about; a real behavior change from every pre-M9 call site (documented, docs/DECISIONS.md).
+    const expiresAt = params.expiresAt ?? new Date(Date.now() + DEFAULT_APPROVAL_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
+
     const request = await approvalRepository.create({
       requestedByAgentId: params.requestedByAgentId,
       action: params.action,
@@ -53,8 +62,17 @@ export const approvalService = {
       resourceId: params.resourceId ?? null,
       evidence: params.evidenceIds ? toJsonString(params.evidenceIds) : null,
       reason: params.reason ?? null,
-      expiresAt: params.expiresAt ?? null,
+      expiresAt,
     });
+
+    if (params.resourceStateHash && params.resourceType && params.resourceId) {
+      await approvalSnapshotRepository.create({
+        approvalRequestId: request.id,
+        resourceType: params.resourceType,
+        resourceId: params.resourceId,
+        stateHash: params.resourceStateHash,
+      });
+    }
 
     await auditService.record({
       actorType: "AGENT",
@@ -118,8 +136,68 @@ export const approvalService = {
     } else if (params.toStatus === "REJECTED") {
       await eventBus.publish({ type: "APPROVAL_REJECTED", payload: { approvalRequestId: request.id } });
     }
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — the single choke point every ApprovalRequest decision passes through, so this is the ApprovalRequest half of the cross-milestone HUMAN_DECISION_MADE event (the four direct-humanDecision-column memo services fire the other half themselves).
+    await eventBus.publish({ type: "HUMAN_DECISION_MADE", payload: { source: "APPROVAL_REQUEST", approvalRequestId: request.id, decision: params.toStatus } });
 
     return updated;
+  },
+
+  /**
+   * Called at the START of every EXECUTE step
+   * (docs/M9_ARCHITECTURE_PROPOSAL.md §38-39: `deploymentService.execute`,
+   * `billingActivationService.activate`,
+   * `growthExperimentExecutionService.approveToRun`). CHECK ONLY —
+   * `APPROVED` has no legal outgoing transition
+   * (`APPROVAL_STATUS_TRANSITIONS.APPROVED === []`, by design: an
+   * approval is an immutable historical fact); this never mutates the
+   * ApprovalRequest, it only decides whether EXECUTE may proceed
+   * RIGHT NOW. `currentStateHash` is the caller's freshly-recomputed
+   * hash of the live resource row at this exact moment — pass `null`
+   * when the resource type has no snapshot hasher yet.
+   */
+  async assertFresh(approvalRequest: ApprovalRequest, currentStateHash: string | null): Promise<void> {
+    const snapshot = await approvalSnapshotRepository.findByApprovalRequestId(approvalRequest.id);
+    const reason = checkApprovalFreshness({
+      expiresAt: approvalRequest.expiresAt,
+      now: new Date(),
+      approvedStateHash: snapshot?.stateHash ?? null,
+      currentStateHash,
+    });
+    if (reason === "EXPIRED") {
+      throw new StaleApprovalError(`STALE_APPROVAL: ApprovalRequest ${approvalRequest.id} expired at ${approvalRequest.expiresAt?.toISOString()} — a human must re-approve before this may execute.`);
+    }
+    if (reason === "RESOURCE_CHANGED") {
+      throw new StaleApprovalError(`STALE_APPROVAL: the resource ApprovalRequest ${approvalRequest.id} approved has changed since approval — a human must re-approve the current version before this may execute.`);
+    }
+  },
+
+  /**
+   * Queue hygiene, distinct from `assertFresh` (docs/M9_ARCHITECTURE_PROPOSAL.md
+   * §38) — a PENDING request whose `expiresAt` has passed while still
+   * awaiting a human is legally transitioned PENDING -> EXPIRED (the
+   * existing, already-legal transition), not merely flagged. Called
+   * from the operating cycle's OBSERVING stage (§28's own sibling
+   * sweep for prediction outcomes) — never a background timer.
+   */
+  async expireOverdue(): Promise<number> {
+    const now = new Date();
+    const pending = await approvalRepository.listQueue();
+    let count = 0;
+    for (const request of pending) {
+      if (request.expiresAt !== null && request.expiresAt.getTime() < now.getTime()) {
+        await approvalRepository.decide(request.id, { status: "EXPIRED", reviewedBy: "system:expiry-sweep", decisionReason: "Expired before a human reviewed it." });
+        // docs/M9_ARCHITECTURE_PROPOSAL.md §35 — stale approval is one of the brief's own named alert sources.
+        await alertService.raise({
+          alertType: "STALE_APPROVAL",
+          severity: "WARNING",
+          resourceType: request.resourceType ?? "APPROVAL_REQUEST",
+          resourceId: request.resourceId ?? request.id,
+          message: `ApprovalRequest ${request.id} (${request.action}) expired at ${request.expiresAt.toISOString()} before a human reviewed it.`,
+        });
+        count += 1;
+      }
+    }
+    return count;
   },
 
   /** REQUEST_MORE_EVIDENCE (Constitution §16/§28): defer with a reason. */

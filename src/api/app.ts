@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 import { agentExecutionsRouter } from "./routes/agent-executions.routes.js";
 import { agentsRouter } from "./routes/agents.routes.js";
+import { alertsRouter } from "./routes/alerts.routes.js";
 import { anomaliesRouter } from "./routes/anomalies.routes.js";
 import { auditRouter } from "./routes/audit.routes.js";
 import { authorizeRouter } from "./routes/authorize.routes.js";
@@ -12,6 +13,8 @@ import { businessMetricsRouter } from "./routes/business-metrics.routes.js";
 import { businessReviewMemosRouter } from "./routes/business-review-memos.routes.js";
 import { ceoRecommendationsRouter } from "./routes/ceo-recommendations.routes.js";
 import { cohortsRouter } from "./routes/cohorts.routes.js";
+import { companyRouter } from "./routes/company.routes.js";
+import { controlPlaneRouter } from "./routes/control-plane.routes.js";
 import { claimsRouter } from "./routes/claims.routes.js";
 import { competitorsRouter } from "./routes/competitors.routes.js";
 import { deploymentPlansRouter } from "./routes/deployment-plans.routes.js";
@@ -28,14 +31,18 @@ import { supportCasesRouter } from "./routes/support-cases.routes.js";
 import { customerDiscoveryMemosRouter } from "./routes/customer-discovery-memos.routes.js";
 import { customerResponsesRouter } from "./routes/customer-responses.routes.js";
 import { decisionCyclesRouter } from "./routes/decision-cycles.routes.js";
+import { decisionQualityRouter } from "./routes/decision-quality.routes.js";
 import { decisionRecordsRouter } from "./routes/decision-records.routes.js";
 import { decisionsRouter } from "./routes/decisions.routes.js";
 import { engineeringTasksRouter } from "./routes/engineering-tasks.routes.js";
 import { evidenceRouter } from "./routes/evidence.routes.js";
 import { eventsRouter } from "./routes/events.routes.js";
+import { founderRouter } from "./routes/founder.routes.js";
 import { icpProfilesRouter } from "./routes/icp-profiles.routes.js";
 import { identitiesRouter } from "./routes/identities.routes.js";
 import { investmentMemosRouter } from "./routes/investment-memos.routes.js";
+import { learningRouter } from "./routes/learning.routes.js";
+import { operatingCyclesRouter } from "./routes/operating-cycles.routes.js";
 import { opportunitiesRouter } from "./routes/opportunities.routes.js";
 import { outreachExperimentsRouter } from "./routes/outreach-experiments.routes.js";
 import { outreachMessagesRouter } from "./routes/outreach-messages.routes.js";
@@ -121,6 +128,15 @@ export function createApp(): Express {
   app.use("/api/portfolio", portfolioRouter);
   app.use("/api/prediction-outcomes", predictionOutcomesRouter);
   app.use("/api/learning-records", learningRecordsRouter);
+
+  // M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §54.
+  app.use("/api/control-plane", controlPlaneRouter);
+  app.use("/api/company", companyRouter);
+  app.use("/api/founder", founderRouter);
+  app.use("/api/decision-quality", decisionQualityRouter);
+  app.use("/api/learning", learningRouter);
+  app.use("/api/operating-cycles", operatingCyclesRouter);
+  app.use("/api/alerts", alertsRouter);
 
   app.use(errorHandler);
 

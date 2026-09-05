@@ -11,9 +11,9 @@ export const eventRepository = {
     return prisma.event.create({ data: input });
   },
 
-  list(filter: { type?: string; limit?: number } = {}): Promise<Event[]> {
+  list(filter: { type?: string; limit?: number; since?: Date } = {}): Promise<Event[]> {
     return prisma.event.findMany({
-      where: { type: filter.type },
+      where: { type: filter.type, occurredAt: filter.since ? { gte: filter.since } : undefined },
       orderBy: { occurredAt: "desc" },
       take: filter.limit ?? 100,
     });

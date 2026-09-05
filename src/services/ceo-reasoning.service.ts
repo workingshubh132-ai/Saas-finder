@@ -1,9 +1,10 @@
-import type { Claim, CeoRecommendation, EngineeringTask, ProductSpec, ValidationReport } from "@prisma/client";
+import type { Claim, CeoRecommendation, CompanyRecommendation, EngineeringTask, ProductSpec, ValidationReport } from "@prisma/client";
 import { z } from "zod";
 import { businessHealthRepository } from "../db/repositories/business-health.repository.js";
 import { businessMetricRepository } from "../db/repositories/business-metric.repository.js";
 import { ceoRecommendationRepository } from "../db/repositories/ceo-recommendation.repository.js";
 import { claimRepository } from "../db/repositories/claim.repository.js";
+import { companyRecommendationRepository } from "../db/repositories/company-recommendation.repository.js";
 import { codeReviewRepository } from "../db/repositories/code-review.repository.js";
 import { customerResponseRepository } from "../db/repositories/customer-response.repository.js";
 import { deploymentPlanRepository } from "../db/repositories/deployment-plan.repository.js";
@@ -26,18 +27,27 @@ import { LAUNCH_OPERATIONS_ACTIONS } from "../domain/decision/launch-operations-
 import { PRODUCT_BUILD_ACTIONS } from "../domain/decision/product-build-action.types.js";
 import { BUSINESS_ACTIONS, BUSINESS_RELEVANT_CLAIM_TYPES } from "../domain/decision/business-action.types.js";
 import { computeDecisionPriority, PLACEHOLDER_NEUTRAL_SCORE } from "../domain/decision/priority.js";
+import { COMPANY_ACTIONS } from "../domain/company-action/company-action.types.js";
+import { PORTFOLIO_BUCKETS, type CompanyStateDimensions, type PortfolioBucket } from "../domain/company-state/company-state.types.js";
 import { checkLaunchBudget } from "../domain/product/launch-budget.js";
 import { checkRevenueConcentration } from "../domain/revenue-intelligence/concentration.js";
 import type { UnitEconomics } from "../domain/pricing-model/unit-economics.js";
+import type { MetricResult } from "../domain/shared/metric-result.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString, toJsonString } from "../domain/shared/json.js";
 import { createRevenueProvider } from "../providers/revenue-provider-factory.js";
 import { agentRuntimeService, type ExecutionBudget, type RunOutcome } from "./agent-runtime.service.js";
 import { auditService } from "./audit.service.js";
+import { alertService } from "./alert.service.js";
+import { companyStateService } from "./company-state.service.js";
+import { concurrencyService } from "./concurrency.service.js";
+import { decisionMemoryService, type DecisionMemoryEntry } from "./decision-memory.service.js";
 import { eventBus } from "./event-bus.js";
 import { evidenceGapService } from "./evidence-gap.service.js";
 import { killIntelligenceService } from "./kill-intelligence.service.js";
 import { completeWithValidation } from "./model-output.js";
+import { portfolioControlService } from "./portfolio-control.service.js";
+import { resourceAllocationService } from "./resource-allocation.service.js";
 
 const MODEL_MAX_OUTPUT_TOKENS = 1024;
 
@@ -664,6 +674,131 @@ function buildDevBusinessActionFixture(summary: BusinessActionSummary, groundedC
   };
 }
 
+const companyActionDecisionSchema = z.object({
+  action: z.enum(COMPANY_ACTIONS),
+  reasoning: z.string().min(1),
+  confidence: z.number().min(0).max(1),
+  targetOpportunityId: z.string().min(1).nullable().default(null),
+  targetProductId: z.string().min(1).nullable().default(null),
+});
+type CompanyActionDecision = z.infer<typeof companyActionDecisionSchema>;
+
+function formatMetric(result: MetricResult): string {
+  if (result.status === "COMPUTED") return result.value.toFixed(2);
+  if (result.status === "INSUFFICIENT_DATA") return `INSUFFICIENT_DATA (${result.reason})`;
+  return "UNKNOWN";
+}
+
+/** Exported only for tests/unit/m9-ceo-company-prompt.test.ts's own direct verification that pastLessons/resourceAllocationConsumedByCategory actually reach the prompt — every other prompt-builder in this file stays private, tested only via its dev fixture's observable decision. */
+export interface CompanyActionSummary {
+  companyState: CompanyStateDimensions;
+  portfolioBucketCounts: Record<PortfolioBucket, number>;
+  opportunityCountsByStatus: Record<string, number>;
+  productCountsByStatus: Record<string, number>;
+  /** "Have we made this mistake before?" (§27, M9 brief §15) — evidentiary, never authoritative: one input line the Chairman may independently contest, exactly like any other cited claim. */
+  pastLessons: readonly DecisionMemoryEntry[];
+  resourceAllocationConsumedByCategory: Record<string, number>;
+}
+
+const CEO_COMPANY_SYSTEM_PROMPT =
+  "You are the CEO of VentureForge, now deciding the SIXTH, company-level question (docs/M9_ARCHITECTURE_PROPOSAL.md " +
+  "§31-32): given everything now known across the ENTIRE company — Company State (cash/revenue/growth/portfolio " +
+  "health/customer health/operational health/risk/evidence quality/decision backlog/execution backlog), Portfolio " +
+  "Control (how many products are WINNERS/PROMISING/UNCERTAIN/STAGNATING/DECLINING/KILL CANDIDATES), and the " +
+  "Opportunity/Product pipeline counts — what should VentureForge do NEXT, across everything, not any single " +
+  "opportunity or product? You have no tools and cannot yourself invest, build, or kill anything; every input is " +
+  "already-established fact. Choose exactly one action: RESEARCH (evidence quality or portfolio size is too thin " +
+  "to decide anything else responsibly); RUN_CUSTOMER_DISCOVERY (unresolved customer uncertainty outweighs " +
+  "everything else); BUILD (a validated opportunity is ready for product work); IMPROVE_PRODUCT (an existing " +
+  "product needs work, not new investment); RUN_EXPERIMENT (a specific company-wide uncertainty is worth testing); " +
+  "GROW (portfolio health is strong and resources should shift toward growth); REDUCE_COST (operational health or " +
+  "risk signals warrant cost discipline); INVEST (the strongest, most evidence-backed opportunity deserves more " +
+  "resources); MAINTAIN (the current allocation is already correct — do not manufacture unnecessary change); PAUSE " +
+  "(company-wide risk or an unresolved decision backlog warrants slowing down before anything else); or " +
+  "PREPARE_KILL_REVIEW (one or more KILL CANDIDATES need a real kill review). If your recommendation concerns one " +
+  "specific opportunity or product, name it (targetOpportunityId/targetProductId); otherwise leave both null — a " +
+  "company-level recommendation may legitimately target the whole portfolio, not any single item. " +
+  'Respond with ONLY JSON matching: {"action": "RESEARCH"|"RUN_CUSTOMER_DISCOVERY"|"BUILD"|"IMPROVE_PRODUCT"|' +
+  '"RUN_EXPERIMENT"|"GROW"|"REDUCE_COST"|"INVEST"|"MAINTAIN"|"PAUSE"|"PREPARE_KILL_REVIEW", "reasoning": string, ' +
+  '"confidence": number, "targetOpportunityId": string|null, "targetProductId": string|null}';
+
+export function buildCompanyActionPrompt(summary: CompanyActionSummary): string {
+  const s = summary.companyState;
+  return [
+    `Cash position: ${formatMetric(s.cashPosition)}`,
+    `Revenue (SUM MRR across LIVE products): ${formatMetric(s.revenue)}`,
+    `Growth (AVG growthHealth): ${formatMetric(s.growth)}`,
+    `Portfolio size (LIVE+PAUSED products): ${s.portfolioSize}`,
+    `Portfolio health (AVG compositeScore): ${formatMetric(s.portfolioHealth)}`,
+    `Customer health: ${formatMetric(s.customerHealth)}`,
+    `Operational health: ${formatMetric(s.operationalHealth)}`,
+    `Risk (AVG kill-risk): ${formatMetric(s.risk)}`,
+    `Evidence quality: ${formatMetric(s.evidenceQuality)}`,
+    `Decision backlog (unified Human Decision Queue): ${s.decisionBacklog}`,
+    `Execution backlog (cycles in EXECUTING): ${s.executionBacklog}`,
+    "",
+    "Portfolio buckets:",
+    ...PORTFOLIO_BUCKETS.map((bucket) => `- ${bucket}: ${summary.portfolioBucketCounts[bucket]}`),
+    "",
+    "Opportunity pipeline (by status):",
+    ...Object.entries(summary.opportunityCountsByStatus).map(([status, count]) => `- ${status}: ${count}`),
+    "",
+    "Product pipeline (by status):",
+    ...Object.entries(summary.productCountsByStatus).map(([status, count]) => `- ${status}: ${count}`),
+    "",
+    "Resource allocation consumed this period (by category):",
+    ...(Object.keys(summary.resourceAllocationConsumedByCategory).length > 0
+      ? Object.entries(summary.resourceAllocationConsumedByCategory).map(([category, consumed]) => `- ${category}: ${consumed}`)
+      : ["- (none recorded yet this period)"]),
+    "",
+    "Past company-level decisions that generated a real lesson (evidentiary, not authoritative — weigh it, don't defer to it blindly):",
+    ...(summary.pastLessons.length > 0
+      ? summary.pastLessons.map((entry) => `- ${entry.learningRecord?.lesson ?? "(lesson pending)"}`)
+      : ["- (no past company-level decision has generated a lesson yet)"]),
+  ].join("\n");
+}
+
+/**
+ * DEVELOPMENT ONLY — deterministic, rule-based, derived from the
+ * company's own real Company State/Portfolio Control facts, same
+ * discipline as buildDevBusinessActionFixture. Rule order
+ * (docs/M9_ARCHITECTURE_PROPOSAL.md §32): thin evidence and a real
+ * kill-candidate signal are checked before any growth/investment
+ * action is ever considered, mirroring Constitution §19's own
+ * kill-review-first discipline.
+ */
+function buildDevCompanyActionFixture(summary: CompanyActionSummary): CompanyActionDecision {
+  const s = summary.companyState;
+  if (s.portfolioSize === 0) {
+    return { action: "RESEARCH", reasoning: "[DEV FIXTURE] The portfolio is empty — nothing to invest in, improve, or kill yet; the next real step is discovering opportunities.", confidence: 0.6, targetOpportunityId: null, targetProductId: null };
+  }
+  if (summary.portfolioBucketCounts.KILL_CANDIDATES > 0) {
+    return {
+      action: "PREPARE_KILL_REVIEW",
+      reasoning: `[DEV FIXTURE] ${summary.portfolioBucketCounts.KILL_CANDIDATES} product(s) are in the KILL_CANDIDATES bucket — a real kill review outranks any new investment decision.`,
+      confidence: 0.7,
+      targetOpportunityId: null,
+      targetProductId: null,
+    };
+  }
+  if (s.evidenceQuality.status !== "COMPUTED" || s.evidenceQuality.value < 0.4) {
+    return { action: "RESEARCH", reasoning: "[DEV FIXTURE] Evidence quality across the portfolio is too thin (UNKNOWN or below 0.40) to responsibly recommend growth or investment.", confidence: 0.55, targetOpportunityId: null, targetProductId: null };
+  }
+  if (s.risk.status === "COMPUTED" && s.risk.value >= 0.6) {
+    return { action: "REDUCE_COST", reasoning: `[DEV FIXTURE] Average portfolio risk (${s.risk.value.toFixed(2)}) is elevated — cost discipline before further growth.`, confidence: 0.6, targetOpportunityId: null, targetProductId: null };
+  }
+  if (summary.portfolioBucketCounts.WINNERS > 0 && s.portfolioHealth.status === "COMPUTED" && s.portfolioHealth.value >= 0.6) {
+    return {
+      action: "GROW",
+      reasoning: `[DEV FIXTURE] ${summary.portfolioBucketCounts.WINNERS} product(s) are WINNERS and portfolio health (${s.portfolioHealth.value.toFixed(2)}) is strong — resources should shift toward growth.`,
+      confidence: 0.65,
+      targetOpportunityId: null,
+      targetProductId: null,
+    };
+  }
+  return { action: "MAINTAIN", reasoning: "[DEV FIXTURE] No dimension crosses a threshold that warrants changing the current allocation — maintaining is the honest recommendation, not manufactured action.", confidence: 0.5, targetOpportunityId: null, targetProductId: null };
+}
+
 /**
  * The CEO (docs/M4_ARCHITECTURE_PROPOSAL.md §12-14) — bounded
  * reasoning over already-validated claims, never a re-derivation of
@@ -1221,6 +1356,123 @@ export const ceoReasoningService = {
         await eventBus.publish({
           type: "CEO_RECOMMENDATION_ISSUED",
           payload: { recommendationId: recommendation.id, opportunityId: product.opportunityId, productId: params.productId, action: decision.action, confidence: decision.confidence },
+        });
+
+        return { recommendation };
+      },
+      CEO_REASONING_BUDGET,
+    );
+  },
+
+  /**
+   * The SIXTH, company-level entry point (docs/M9_ARCHITECTURE_PROPOSAL.md
+   * §31) — the widest input summary any CEO axis in this codebase has
+   * ever received: Company State + Portfolio Control + the Opportunity/
+   * Product pipelines + Resource Allocation + decisionMemoryService's
+   * own "past mistakes" lookup (a real gap this build caught: an
+   * earlier version's own doc comment said these two would be "added
+   * once those services exist," but neither task #203 nor #206 ever
+   * came back to actually wire them in — both services existed with no
+   * caller feeding their output into this prompt at all). Persists a
+   * `CompanyRecommendation`, not a `CeoRecommendation` — this axis's own
+   * table, since a company-level recommendation may legitimately target
+   * zero, one, or the whole portfolio, unlike every other axis's
+   * required, single-opportunity FK (docs/DECISIONS.md's own M9 entry).
+   */
+  async recommendCompanyAction(params: { agentId: string; startedBy: AuthenticatedActor; operatingCycleId?: string | null }): Promise<RunOutcome<{ recommendation: CompanyRecommendation }>> {
+    const [companyState, portfolio, allOpportunities, allProducts, resourceAllocations, pastLessons] = await Promise.all([
+      companyStateService.getState(),
+      portfolioControlService.overview(),
+      opportunityRepository.list(),
+      productRepository.list(),
+      resourceAllocationService.getForPeriod(),
+      decisionMemoryService.findSimilarPastDecisions("COMPANY_RECOMMENDATION"),
+    ]);
+
+    const portfolioBucketCounts = Object.fromEntries(PORTFOLIO_BUCKETS.map((bucket) => [bucket, portfolio[bucket].length])) as Record<PortfolioBucket, number>;
+    const opportunityCountsByStatus: Record<string, number> = {};
+    for (const o of allOpportunities) opportunityCountsByStatus[o.status] = (opportunityCountsByStatus[o.status] ?? 0) + 1;
+    const productCountsByStatus: Record<string, number> = {};
+    for (const p of allProducts) productCountsByStatus[p.status] = (productCountsByStatus[p.status] ?? 0) + 1;
+    const resourceAllocationConsumedByCategory: Record<string, number> = {};
+    for (const a of resourceAllocations) resourceAllocationConsumedByCategory[a.category] = a.consumed;
+
+    const summary: CompanyActionSummary = { companyState, portfolioBucketCounts, opportunityCountsByStatus, productCountsByStatus, pastLessons, resourceAllocationConsumedByCategory };
+    const validOpportunityIds = new Set(allOpportunities.map((o) => o.id));
+    const validProductIds = new Set(allProducts.map((p) => p.id));
+
+    const execution = await agentRuntimeService.startExecution({
+      agentId: params.agentId,
+      taskId: null,
+      input: { mode: "COMPANY_ACTION" },
+      startedBy: params.startedBy,
+    });
+
+    return agentRuntimeService.run(
+      execution.id,
+      async (handle) => {
+        handle.step();
+        const { value: decision } = await completeWithValidation(handle.callModel, companyActionDecisionSchema, {
+          systemPrompt: CEO_COMPANY_SYSTEM_PROMPT,
+          maxOutputTokens: MODEL_MAX_OUTPUT_TOKENS,
+          messages: [{ role: "user", content: buildCompanyActionPrompt(summary) }],
+          devFixtureResponse: buildDevCompanyActionFixture(summary),
+        });
+
+        await handle.transition("PROCESSING_RESULT");
+        handle.step();
+
+        // Never trust a model-supplied id at face value (the same discipline every citedClaimIds filter in this file already applies) — a hallucinated target is silently dropped, not persisted.
+        const targetOpportunityId = decision.targetOpportunityId && validOpportunityIds.has(decision.targetOpportunityId) ? decision.targetOpportunityId : null;
+        const targetProductId = decision.targetProductId && validProductIds.has(decision.targetProductId) ? decision.targetProductId : null;
+
+        // Concurrency conflict detection (docs/M9_ARCHITECTURE_PROPOSAL.md §40) — a human-visible flag, never a
+        // database lock; the older pending recommendation is never silently superseded, only annotated alongside it.
+        const concurrency = await concurrencyService.checkCompanyRecommendationConflict(decision.action, targetOpportunityId, targetProductId);
+        if (concurrency.conflicting && concurrency.conflictingRecommendationId) {
+          await alertService.raise({
+            alertType: "CONCURRENT_CONFLICT",
+            severity: "WARNING",
+            resourceType: "COMPANY_RECOMMENDATION",
+            resourceId: concurrency.conflictingRecommendationId,
+            message: `A new ${decision.action} recommendation conflicts with pending recommendation ${concurrency.conflictingRecommendationId} — a human must resolve which stands.`,
+          });
+        }
+        const reasoning = concurrency.conflicting
+          ? `[CONCURRENT_CONFLICT with recommendation ${concurrency.conflictingRecommendationId}, still pending human review] ${decision.reasoning}`
+          : decision.reasoning;
+        const citedResourceIds = Array.from(
+          new Set([
+            ...(targetOpportunityId ? [targetOpportunityId] : []),
+            ...(targetProductId ? [targetProductId] : []),
+            ...(concurrency.conflictingRecommendationId ? [concurrency.conflictingRecommendationId] : []),
+            ...allProducts.map((p) => p.id),
+          ]),
+        );
+
+        const recommendation = await companyRecommendationRepository.create({
+          action: decision.action,
+          reasoning,
+          targetOpportunityId,
+          targetProductId,
+          citedResourceIds: toJsonString(citedResourceIds),
+          confidence: decision.confidence,
+          operatingCycleId: params.operatingCycleId ?? null,
+        });
+
+        await auditService.record({
+          actorType: "AGENT",
+          actorId: params.agentId,
+          action: `CEO_COMPANY_ACTION_RECOMMENDATION_${decision.action}`,
+          resourceType: "COMPANY",
+          resourceId: recommendation.id,
+          result: "SUCCESS",
+          metadata: { confidence: decision.confidence, targetOpportunityId, targetProductId, concurrentConflict: concurrency.conflicting, conflictingRecommendationId: concurrency.conflictingRecommendationId },
+        });
+        // Reused verbatim (docs/M9_ARCHITECTURE_PROPOSAL.md §42) — the same event every other CEO axis already fires.
+        await eventBus.publish({
+          type: "CEO_RECOMMENDATION_ISSUED",
+          payload: { companyRecommendationId: recommendation.id, action: decision.action, confidence: decision.confidence, targetOpportunityId, targetProductId },
         });
 
         return { recommendation };

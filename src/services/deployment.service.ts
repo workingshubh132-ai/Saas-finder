@@ -1,11 +1,13 @@
 import type { Deployment } from "@prisma/client";
 import { deploymentRepository } from "../db/repositories/deployment.repository.js";
+import { hashDeploymentPlan } from "../domain/approval/resource-snapshot.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { createDeploymentProvider } from "../providers/deployment-provider-factory.js";
 import { assertHumanActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 import { deploymentPlanService } from "./deployment-plan.service.js";
+import { emergencyStopService } from "./emergency-stop.service.js";
 import { eventBus } from "./event-bus.js";
 import { productService } from "./product.service.js";
 
@@ -32,6 +34,8 @@ export interface RollbackDeploymentParams {
 export const deploymentService = {
   async execute(params: ExecuteDeploymentParams): Promise<Deployment> {
     assertHumanActor(params.actor);
+    // Fails closed (docs/M9_ARCHITECTURE_PROPOSAL.md §57) — checked at every EXECUTE step, alongside the staleness check below.
+    await emergencyStopService.assertNotActive();
 
     const plan = await deploymentPlanService.getOrThrow(params.deploymentPlanId);
     if (plan.status !== "HUMAN_APPROVED") {
@@ -47,6 +51,8 @@ export const deploymentService = {
     if (approvalRequest.status !== "APPROVED" || approvalRequest.resourceType !== "DEPLOYMENT_PLAN" || approvalRequest.resourceId !== plan.id) {
       throw new NotFoundError("Approved ApprovalRequest for DeploymentPlan", plan.id);
     }
+    // Change detection + approval expiration (docs/M9_ARCHITECTURE_PROPOSAL.md §38-39) — the start of every EXECUTE step.
+    await approvalService.assertFresh(approvalRequest, hashDeploymentPlan(plan));
 
     const product = await productService.getOrThrow(plan.productId);
     if (product.status !== "AWAITING_LAUNCH_APPROVAL") {
@@ -93,6 +99,8 @@ export const deploymentService = {
     if (result.status === "LIVE") {
       await eventBus.publish({ type: "PRODUCT_DEPLOYED", payload: { productId: product.id, deploymentId: deployment.id, environment: plan.environment, provider: provider.id } });
     }
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §42 — the generic EXECUTE-step event, alongside PRODUCT_DEPLOYED, never replacing it.
+    await eventBus.publish({ type: "ACTION_EXECUTED", payload: { action: "DEPLOY", resourceType: "PRODUCT", resourceId: product.id, status: result.status } });
 
     return deployment;
   },

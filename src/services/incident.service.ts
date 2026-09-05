@@ -1,11 +1,15 @@
 import type { Incident } from "@prisma/client";
 import { incidentRepository, type UpdateIncidentStatusExtra } from "../db/repositories/incident.repository.js";
 import { INCIDENT_STATUS_TRANSITIONS, isIncidentSeverity, isIncidentStatus } from "../domain/incident/incident.types.js";
+import type { AlertSeverity } from "../domain/alert/alert.types.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
 import type { Actor } from "./agent.service.js";
+import { alertService } from "./alert.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
+
+const INCIDENT_SEVERITY_TO_ALERT_SEVERITY: Readonly<Record<string, AlertSeverity>> = { LOW: "INFO", MEDIUM: "WARNING", HIGH: "WARNING", CRITICAL: "CRITICAL" };
 
 export interface CreateIncidentParams {
   productId: string;
@@ -38,6 +42,14 @@ export const incidentService = {
       metadata: { incidentId: incident.id, severity: incident.severity, deploymentId: params.deploymentId ?? null },
     });
     await eventBus.publish({ type: "INCIDENT_DETECTED", payload: { incidentId: incident.id, productId: params.productId, severity: incident.severity } });
+    // docs/M9_ARCHITECTURE_PROPOSAL.md §35 — a real, already-created Incident is one of the brief's own named alert sources.
+    await alertService.raise({
+      alertType: "INCIDENT",
+      severity: INCIDENT_SEVERITY_TO_ALERT_SEVERITY[incident.severity] ?? "WARNING",
+      resourceType: "PRODUCT",
+      resourceId: params.productId,
+      message: `Incident (${incident.severity}): ${incident.summary}`,
+    });
 
     return incident;
   },

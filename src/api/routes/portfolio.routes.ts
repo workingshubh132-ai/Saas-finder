@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { portfolioSnapshotRepository } from "../../db/repositories/portfolio-snapshot.repository.js";
+import { controlPlaneService } from "../../services/control-plane.service.js";
 import { portfolioService } from "../../services/portfolio.service.js";
 import { asyncHandler } from "../middleware/async-handler.js";
 import { getActor, requireAuth } from "../middleware/authenticate.js";
@@ -8,6 +9,15 @@ import { requireQueryParam } from "../middleware/params.js";
 import { validateBody } from "../middleware/validate.js";
 
 export const portfolioRouter = Router();
+
+/** The Portfolio Control view (docs/M9_ARCHITECTURE_PROPOSAL.md §22) — every LIVE/PAUSED product bucketed by business health, reusing portfolioAnalystService's own reads. */
+portfolioRouter.get(
+  "/overview",
+  requireAuth(),
+  asyncHandler(async (_req, res) => {
+    res.json(await controlPlaneService.getPortfolio());
+  }),
+);
 
 portfolioRouter.get(
   "/snapshots",

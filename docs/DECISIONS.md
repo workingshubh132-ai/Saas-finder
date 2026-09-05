@@ -1347,3 +1347,228 @@ once real data flowed through the real pipeline:
   floor of `0.3`, comfortably below the `0.375` floor one agent with
   real data would produce — restoring the intent the threshold's own
   comment already stated ("EARLY, regardless of the raw scores").
+
+## M9 decisions
+
+## 71. `CompanyRecommendation`/`CompanyReview` as new tables, not reusing `CeoRecommendation`/`ChairmanReview`
+
+Every prior CEO axis (M4 opportunity, M5 customer-discovery, M6
+product-build, M7 launch-operations, M8 business-action) persists to
+`CeoRecommendation`, whose `opportunityId` FK is required and
+non-nullable — a structural assumption every one of those five axes
+shares: "every CEO decision is about exactly one opportunity." The
+sixth, company-level axis (`docs/M9_ARCHITECTURE_PROPOSAL.md` §31-34)
+breaks that assumption on purpose — a company-wide recommendation may
+legitimately target zero, one, or conceptually the whole portfolio, and
+forcing a required `opportunityId` onto it would mean inventing a fake
+target for the (common) case where none applies. Two new tables,
+mirroring `CeoRecommendation`/`ChairmanReview`'s own shape field-for-field
+(`action`/`reasoning`/`confidence`, `decision`/`objections`/
+`missingEvidence`/`recommendation`) with nullable `targetOpportunityId`/
+`targetProductId` instead. This is the one deliberate exception to this
+build's own reuse-over-rebuild discipline — the exception is itself
+reasoned and documented, not a shortcut.
+
+## 72. `founderDecisionQueueService`, not `decisionQueueService` — a real naming collision with M1's own service, caught and fixed mid-build
+
+The Human Decision Queue (§19) needed a service to union PENDING
+`ApprovalRequest`s, the five memo tables, and undecided
+`CompanyRecommendation`s. Writing it at
+`src/services/decision-queue.service.ts` overwrote M1's own, still-used
+`decisionQueueService` (a single-`ApprovalRequest` enrichment view —
+evidence + linked opportunity + Chairman review for ONE pending
+request — consumed by `decisions.routes.ts` and the M1 vertical-slice
+test) — a real, self-caught mistake: `Write` has no "read first" guard
+the way `Edit` does, and the overwrite wasn't noticed until `tsc`
+surfaced real callers expecting the old shape. Fixed by `git checkout
+--` restoring the original file exactly, then building the new
+union-of-three-sources logic under its own name,
+`founderDecisionQueueService` (`src/services/founder-decision-queue.service.ts`).
+The two coexist rather than one replacing the other — genuinely
+different capabilities that happen to sound similar.
+
+## 73. `CompanyRecommendation` carries its own human-decision fields inline — no sixth memo table
+
+Every other CEO axis compiles a dedicated memo (`InvestmentMemo`,
+`CustomerDiscoveryMemo`, `ProductReviewMemo`, `LaunchReviewMemo`,
+`BusinessReviewMemo`) to hold rich, multi-section compiled content
+before a human decides. A company-level recommendation has no
+comparable rich content to compile beyond what `CompanyRecommendation`
+and its own `CompanyReview` already store — so rather than add a sixth
+memo table for symmetry's sake, `humanDecision`/`humanReason`/
+`decidedAt`/`decidedByIdentityId` live directly on
+`CompanyRecommendation`, reusing `BUSINESS_REVIEW_HUMAN_DECISIONS`'
+vocabulary (`APPROVE`/`REQUEST_CHANGES`/`REJECT`/`DEFER`) rather than
+inventing a seventh. `companyRecommendationRepository.recordHumanDecision`
+existed with zero callers until this same build later added
+`companyRecommendationService.recordHumanDecision` (#78 below) — the
+inline-fields choice was correct; the missing caller was the actual gap.
+
+## 74. Change detection (`assertFresh`) and queue hygiene (`expireOverdue`) are two separate mechanisms, not one function doing both jobs
+
+`docs/M9_ARCHITECTURE_PROPOSAL.md`'s own prose describes a "PENDING →
+EXPIRED transition," which reads as one mechanism but is actually two,
+with different responsibilities and different mutation rules:
+`approvalService.expireOverdue()` is a queue-hygiene sweep over
+PENDING-and-overdue `ApprovalRequest`s, transitioning them to `EXPIRED`
+(a real, legal `APPROVAL_STATUS_TRANSITIONS` edge). `assertFresh(approvalRequest,
+currentStateHash)` is the EXECUTE-time staleness check and is
+deliberately CHECK-ONLY — it never mutates the request's own status,
+because `APPROVAL_STATUS_TRANSITIONS.APPROVED === []`: an already-`APPROVED`
+request has no legal outgoing transition at all, and a staleness check
+firing on it is expressing "this specific execution attempt is stale,"
+never "this approval retroactively un-happened." Building one function
+to do both jobs would have required either mutating a terminal status
+(illegal) or silently skipping the mutation half for `APPROVED` rows
+(a hidden special case) — two small, single-purpose functions instead.
+
+## 75. `hashDeploymentPlan`/`hashGrowthExperiment`/`hashBillingPlan`: a documented, narrow field subset per resource type — and a real bug in the billing one
+
+Change detection (§39) hashes only the fields whose change would
+materially affect whether a human's original approval still applies —
+never every column (`createdAt`/`status`/`id` churn on their own would
+make every approval look stale). `hashDeploymentPlan` = `{environment,
+provider, strategy, artifactRef}`; `hashGrowthExperiment` = `{hypothesis,
+estimatedCostUsd, riskLevel}`. `hashBillingPlan` originally also
+included `status` — a real bug this build caught via the full test
+suite, not by inspection: `BillingPlan.status` legitimately transitions
+`DRAFT → HUMAN_APPROVED` between approval-request time and execute
+time, so including it meant `assertFresh` reported `RESOURCE_CHANGED`
+on every single billing activation, failing
+`tests/integration/m7-capstone-billing.test.ts`. Fixed by dropping
+`status` from the hashed subset (now `{provider, pricingModelId}`
+only); `tests/unit/m9-approval-staleness.test.ts` now pins the
+resulting hash function's own type signature (`Pick<BillingPlan,
+"provider" | "pricingModelId">`) so `status` cannot be reintroduced by
+accident — the type system, not a runtime check, is what makes this
+regression structurally impossible now.
+
+## 76. Concurrency conflict detection is read-time-only, never a lock, and deliberately narrow in scope
+
+Two `CompanyRecommendation`s targeting the same resource with opposing
+actions (`isConflictingAction` — one `EXPANSIVE_ACTIONS`, one
+`CONTRACTIVE_ACTIONS`) are flagged, never blocked: this codebase's own
+real write concurrency (SQLite, WAL mode, one process) needs no
+distributed lock (`docs/DECISIONS.md` #61's "smallest correct model"
+precedent, reapplied). `concurrencyService.checkCompanyRecommendationConflict`
+is wired into `recommendCompanyAction` only — the brief's own explicit
+instruction not to retrofit new governance rules onto the five
+*existing*, already-shipped CEO axes, which keep their current
+behavior unchanged. A detected conflict prefixes the new
+recommendation's own `reasoning` text, adds the conflicting id to
+`citedResourceIds`, and raises a `CONCURRENT_CONFLICT` alert — the
+older pending recommendation is never superseded or deleted; both stay
+visible in the Human Decision Queue for a human to resolve.
+
+## 77. Deliberate scope boundaries, named rather than silently left incomplete
+
+Two real, time-boxed scope decisions, made explicitly rather than
+discovered as gaps later: **Resource Allocation** (§23) is read+report
+only — `AGENT_EXECUTION` is the one category computed automatically
+(reusing `companyBudgetService`'s own date-range read); the other four
+(`ENGINEERING`/`MARKETING`/`RESEARCH`/`FOUNDER_ATTENTION`) are
+`recordConsumption`-settable by an external caller, since no real
+per-category usage signal exists anywhere else in this codebase to
+compute them from automatically. **Company Alerts** (§35) are wired
+into 7 of the 12 named `ALERT_TYPES`
+(`ANOMALY`/`INCIDENT`/`BUSINESS_HEALTH_DECLINED`/`EMERGENCY_STOP`/
+`BUDGET_EXHAUSTED`/`CONCURRENT_CONFLICT`/`STALE_APPROVAL`); the other
+five (`PROVIDER_FAILURE`/`CUSTOMER_LOST`/`RAPID_GROWTH`/
+`UNEXPECTED_OPPORTUNITY`/`CONTRADICTORY_EVIDENCE`) have no real,
+already-computed signal anywhere in M1-M8 to raise them from yet and
+are deliberately deferred rather than backed by a fabricated detector.
+
+## 78. Real bugs this build caught before they shipped
+
+Two of these are genuinely structural — not edge cases, but the core
+mechanism the whole milestone is named for having never actually run
+end-to-end before `tests/unit/m9-operating-cycle.test.ts` and
+`tests/integration/m9-capstone-operating-cycle.test.ts` first drove a
+real `OperatingCycle` all the way from `CREATED` to `COMPLETED`:
+
+- **`resetDatabase()` (`tests/setup.ts`) was never extended for any of
+  the twelve M9 tables.** The M1-M8-era function already deletes every
+  prior milestone's own leaf tables in FK-safe order before each test,
+  but M9's own migration (task #197) added `OperatingCycle`,
+  `CycleStageEvent`, `CompanyRecommendation`, `CompanyReview`,
+  `EmergencyStop`, and seven others with zero corresponding cleanup.
+  `OperatingCycle.startedByIdentityId` carries a `Restrict` FK to
+  `Identity`, so the very first test to create a real `OperatingCycle`
+  row would have broken `resetDatabase()`'s own
+  `identity.deleteMany()` for every later test in the entire suite with
+  a foreign-key violation. Caught while writing this milestone's own
+  first `OperatingCycle`-creating test, before it could compound; fixed
+  by adding all twelve tables to `resetDatabase()` in FK-safe order
+  (`cycleStageEvent`/`companyReview` before their own parents, the rest
+  order-independent).
+- **`CYCLE_STATUS_TRANSITIONS.RUNNING` never allowed `AWAITING_HUMAN`**
+  — meaning `schedulerService.routeToAwaitingHuman` (the mechanism
+  every mid-cycle human-review request depends on) had never once
+  successfully executed in any test before this milestone's own
+  `tests/integration/m9-capstone-operating-cycle.test.ts`. The shared
+  `CYCLE_STATUS_TRANSITIONS` table (`src/domain/shared/cycle-lifecycle.ts`,
+  reused verbatim from M3/M4) only ever produced `AWAITING_HUMAN` as a
+  pre-flight permission gate reachable from `SCHEDULED` — M9's own,
+  genuinely new need (a mid-flight pause while already `RUNNING`) was
+  simply missing from the table. Fixed by adding the one missing edge;
+  safe for M3/M4 too, since neither `research-cycle.service.ts` nor
+  `decision-cycle.service.ts` has any code path that requests it.
+- **`runNextStage`'s `DECIDING` case could never actually reach
+  `EXECUTING`, for any company-level recommendation, ever** — the
+  single most consequential bug this build found. `DECIDING`'s own
+  `CycleStageEvent` is deliberately left open when routing to
+  `AWAITING_HUMAN` (so a resume re-enters it, per
+  `resolveResumeStage`'s own history-based rule) — but `DECIDING`'s
+  handler unconditionally created a *new* `CompanyRecommendation` and
+  re-requested human review on every re-entry, never checking whether
+  the *previous* recommendation had already been decided. A human
+  could approve forever and the cycle would loop `DECIDING ⟷
+  AWAITING_HUMAN` indefinitely. Compounding this, `schedulerService.advanceStage`'s
+  own array-adjacency default (`CYCLE_STAGES[currentIndex + 1]`) can
+  *only* ever move `DECIDING → AWAITING_HUMAN` — there was no way to
+  ask it for the other legal branch (`DECIDING → EXECUTING`) at all.
+  Fixed two ways together: `advanceStage` gained an optional
+  `targetStage` override (validated via the same `assertTransition`
+  call, so an illegal target still throws); `runNextStage`'s `DECIDING`
+  case now checks `companyRecommendationRepository.listForCycle` for an
+  already-decided recommendation first, and if found, calls
+  `advanceStage({..., targetStage: "EXECUTING"})` directly instead of
+  creating a duplicate. Verified end-to-end by
+  `tests/integration/m9-capstone-operating-cycle.test.ts`, which asserts
+  exactly one `CompanyRecommendation` exists both before and after the
+  fix's own re-entry path runs.
+- **The CEO's and Chairman's company-level dev fixtures could never
+  actually disagree, under any company-state configuration** — making
+  the M9 brief's own named "conflict capstone" (CEO recommends an
+  expansive action, Chairman `REJECT`s it) structurally unreachable.
+  Both fixtures read the exact same `CompanyStateDimensions`/portfolio-bucket
+  facts with matched thresholds (`KILL_CANDIDATES > 0` and
+  `evidenceQuality < 0.4` in both places), so a well-functioning
+  Chairman reading the same real, unambiguous facts as a well-functioning
+  CEO reached the same conclusion every time — genuine, by-construction
+  agreement, not a bug in either fixture individually. Fixed by giving
+  the Chairman one genuinely new, independently-motivated check the
+  CEO's own fixture never looks at at all: `customerHealth` (a `GROW`/
+  `INVEST` recommendation is `REJECT`ed when the customer base itself
+  is unhealthy, even with a strong composite score) — exactly the kind
+  of blind spot an adversarial second opinion exists to catch, not a
+  fabricated disagreement. Proven end-to-end in
+  `tests/integration/m9-capstone-conflict.test.ts`.
+- **`decisionMemoryService`'s "past mistakes" lookup and
+  `resourceAllocationService`'s own read were both built (tasks #203 and
+  #206) with zero caller ever feeding their output into the CEO's
+  company-level prompt** — `recommendCompanyAction`'s own doc comment
+  said as much ("added once those services exist... never fabricated
+  here in the meantime"), but neither task ever came back to actually
+  wire them in, leaving `docs/M9_ARCHITECTURE_PROPOSAL.md` §31's own
+  "the widest input summary any CEO axis has ever received" claim
+  false. Caught while assembling the memory capstone
+  (`tests/integration/m9-capstone-memory.test.ts`) and confirmed via a
+  direct grep showing `decisionMemoryService` had exactly one real
+  reference anywhere in `ceo-reasoning.service.ts` — the stale comment
+  itself. Fixed by fetching both in `recommendCompanyAction` and
+  threading them into `buildCompanyActionPrompt`'s own output
+  (exported, along with `CompanyActionSummary`, specifically so this
+  fix has a direct test rather than only an indirect one through the
+  dev fixture, which never needed to react to free-text lesson content
+  in the first place).

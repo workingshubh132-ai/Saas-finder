@@ -1,5 +1,6 @@
 import type { ApprovalRequest, GrowthExperiment } from "@prisma/client";
 import { growthExperimentRepository, type CreateGrowthExperimentInput } from "../db/repositories/growth-experiment.repository.js";
+import { hashGrowthExperiment } from "../domain/approval/resource-snapshot.js";
 import { GROWTH_EXPERIMENT_TRANSITIONS, isGrowthExperimentStatus } from "../domain/growth-experiment/growth-experiment.types.js";
 import { ValidationError } from "../domain/shared/errors.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
@@ -67,6 +68,7 @@ export const growthExperimentService = {
       resourceType: "GROWTH_EXPERIMENT",
       resourceId: experiment.id,
       reason: experiment.hypothesis,
+      resourceStateHash: hashGrowthExperiment(experiment),
     });
     await growthExperimentRepository.setApprovalRequest(experiment.id, approvalRequest.id);
 

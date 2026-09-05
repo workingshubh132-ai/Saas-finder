@@ -15,6 +15,7 @@ import { ValidationError } from "../domain/shared/errors.js";
 import { killIntelligenceService } from "./kill-intelligence.service.js";
 import { agentRuntimeService, type ExecutionBudget, type RunOutcome } from "./agent-runtime.service.js";
 import { auditService } from "./audit.service.js";
+import { eventBus } from "./event-bus.js";
 import { completeWithValidation } from "./model-output.js";
 
 const MODEL_MAX_OUTPUT_TOKENS = 1024;
@@ -231,6 +232,8 @@ export const portfolioAnalystService = {
           result: "SUCCESS",
           metadata: { productCount: inputs.length, confidence: output.confidence },
         });
+        // docs/M9_ARCHITECTURE_PROPOSAL.md §8, §42 — no M8 event fired here before this fix.
+        await eventBus.publish({ type: "PORTFOLIO_ANALYZED", payload: { runId, productCount: inputs.length } });
 
         return { runId, snapshots };
       },

@@ -15,3 +15,25 @@ export const LEARNING_RECORD_ERROR_THRESHOLD = 0.25;
 export function shouldGenerateLearningRecord(errorPct: number | null): boolean {
   return errorPct !== null && Math.abs(errorPct) > LEARNING_RECORD_ERROR_THRESHOLD;
 }
+
+/**
+ * M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §30, M9 brief §18's own list,
+ * verbatim. Constrains LearningRecord.rootCause's existing free-text
+ * column with a documented, closed vocabulary — additive, no schema
+ * change (rootCause was already a nullable String).
+ */
+export const LEARNING_ROOT_CAUSES = [
+  "BAD_EVIDENCE",
+  "INSUFFICIENT_EVIDENCE",
+  "BAD_ASSUMPTION",
+  "BAD_MODEL_REASONING",
+  "WRONG_MARKET",
+  "EXECUTION_FAILURE",
+  "EXTERNAL_SHOCK",
+  "MEASUREMENT_ERROR",
+] as const;
+export type LearningRootCause = (typeof LEARNING_ROOT_CAUSES)[number];
+
+export function isLearningRootCause(value: string): value is LearningRootCause {
+  return (LEARNING_ROOT_CAUSES as readonly string[]).includes(value);
+}

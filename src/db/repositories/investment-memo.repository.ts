@@ -32,4 +32,15 @@ export const investmentMemoRepository = {
   findLatestForOpportunity(opportunityId: string): Promise<InvestmentMemo | null> {
     return prisma.investmentMemo.findFirst({ where: { opportunityId }, orderBy: { createdAt: "desc" } });
   },
+
+  /**
+   * InvestmentMemo is the one memo table with no direct humanDecision
+   * column (docs/M9_ARCHITECTURE_PROPOSAL.md §10, §19) — its own human
+   * decision flows through a required-FK `DecisionRecord` instead
+   * (M4's KILL-decision wiring onto the approval infrastructure).
+   * "Undecided" here means no DecisionRecord references it yet.
+   */
+  listUndecided(): Promise<InvestmentMemo[]> {
+    return prisma.investmentMemo.findMany({ where: { decisionRecords: { none: {} } }, orderBy: { createdAt: "asc" } });
+  },
 };

@@ -92,3 +92,44 @@ export class BudgetExceededError extends DomainError {
   readonly statusCode = 429;
   readonly errorCode: ErrorCode = "BUDGET_EXCEEDED";
 }
+
+/**
+ * M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §38-39. Thrown by
+ * assertApprovalNotStale for either reason a previously-APPROVED
+ * ApprovalRequest may no longer be safe to execute: its own expiresAt
+ * has passed, or the underlying resource materially changed since the
+ * approval was granted (a state-hash mismatch). Both share one error
+ * type — both answer the same question ("is this approval still good
+ * for what's about to happen") — the message says which.
+ */
+export class StaleApprovalError extends DomainError {
+  readonly statusCode = 409;
+  readonly errorCode: ErrorCode = "DOMAIN_ERROR";
+}
+
+/**
+ * M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §40. Thrown when a second,
+ * still-pending CeoRecommendation for the same resource conflicts with
+ * an earlier one still awaiting a human decision. Never silently
+ * resolved — both approvals are frozen until a human explicitly picks
+ * one via resolveConcurrentConflict.
+ */
+export class ConcurrentConflictError extends DomainError {
+  readonly statusCode = 409;
+  readonly errorCode: ErrorCode = "DOMAIN_ERROR";
+}
+
+/**
+ * M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §46, §57. Thrown by every
+ * stage-advance and EXECUTE call site while the company-wide
+ * EmergencyStop is active. Fails closed: an error checking the stop's
+ * own state is treated as this error, never as "the stop is inactive."
+ */
+export class EmergencyStopActiveError extends DomainError {
+  readonly statusCode = 403;
+  readonly errorCode: ErrorCode = "AUTHORIZATION_ERROR";
+
+  constructor() {
+    super("Company-wide emergency stop is active — no new consequential execution may start until a human resumes it.");
+  }
+}
