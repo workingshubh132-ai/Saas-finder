@@ -39,14 +39,34 @@ function section(title: string): void {
   console.log(`\n${"=".repeat(70)}\n${title}\n${"=".repeat(70)}`);
 }
 
+const USAGE = "Usage: npx tsx scripts/ingest-research-signals.ts path/to/signals.json [experimentId]";
+const INPUT_SHAPE = `
+Input file — a JSON array of ExternalResearchSignalInput (docs/RESEARCH_SIGNAL_INGESTION.md):
+{
+  "source": { "id": "reddit", "type": "WEB", "group": "r/smallbusiness thread 123" },
+  "title": "...",
+  "content": "...",
+  "url": "https://...",
+  "observedAt": "2026-09-05T00:00:00Z",
+  "authorContext": "u/someuser",
+  "externalReference": "Found via WebSearch, 2026-09-05, query: \\"invoice chasing tool\\"",
+  "reality": "REAL",
+  "provenanceNote": "Read directly from the real thread URL above."
+}
+
+"reality" is one of REAL | DEV_FIXTURE | HUMAN_ACTION | SIMULATED (src/domain/real-world/reality.types.ts).
+REAL/HUMAN_ACTION require a non-empty "provenanceNote" — an item without one is rejected, not silently stored.
+`;
+
 async function main(): Promise<void> {
   const filePath = process.argv[2];
-  const experimentId = process.argv[3] ?? null;
-  if (!filePath) {
-    console.error("Usage: npx tsx scripts/ingest-research-signals.ts path/to/signals.json [experimentId]");
-    process.exitCode = 1;
+  if (!filePath || filePath === "--help" || filePath === "-h") {
+    console.error(USAGE);
+    console.error(INPUT_SHAPE);
+    process.exitCode = filePath ? 0 : 1;
     return;
   }
+  const experimentId = process.argv[3] ?? null;
 
   section("RESEARCH SIGNAL IMPORT (docs/RESEARCH_SIGNAL_INGESTION.md)");
 
