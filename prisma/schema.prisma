@@ -1350,7 +1350,12 @@ model OutreachMessage {
   approvalRequestId String?          @map("approval_request_id")
   approvalRequest   ApprovalRequest? @relation(fields: [approvalRequestId], references: [id], onDelete: SetNull)
 
-  /// Record-keeping only — no code path in this system ever sends anything externally (§13).
+  /// Record-keeping only — these two fields are never themselves what transmits anything (§13).
+  /// Set by messageApprovalService.markContacted, reached one of two ways (docs/AUTONOMOUS_OPERATIONS_AUDIT.md):
+  /// the Human Owner personally sends the approved text and confirms it here (the only path before
+  /// Autonomous Operations Phase A, still fully supported), or outboundMessageService.send() calls it
+  /// automatically, SYSTEM-attributed, immediately after a real OutboundMessageProvider confirms SENT —
+  /// never before, and only ever DEV_FIXTURE in this deployment (see `deliveries` below).
   contactedAt           DateTime? @map("contacted_at")
   contactedByIdentityId String?   @map("contacted_by_identity_id")
 
