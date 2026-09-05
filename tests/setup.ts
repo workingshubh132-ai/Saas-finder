@@ -111,6 +111,8 @@ async function resetDatabase(): Promise<void> {
   await prisma.companyReview.deleteMany();
   await prisma.companyRecommendation.deleteMany();
   await prisma.operatingCycle.deleteMany();
+  // M10 — real_world_experiments.created_by_identity_id is Restrict, same reason as above.
+  await prisma.realWorldExperiment.deleteMany();
   await prisma.founderAttentionItem.deleteMany();
   await prisma.companyBudget.deleteMany();
   await prisma.resourceAllocation.deleteMany();

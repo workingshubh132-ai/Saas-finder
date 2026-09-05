@@ -1594,3 +1594,66 @@ does; every other M9 capability reuses VentureForge's own
 already-installed `express`/`zod`/`@prisma/client`/`vitest`/`typescript`.
 `npm audit --omit=dev` reports the same pre-existing advisories prior
 milestones already documented — unchanged by M9, not newly introduced.
+
+## M10 — Real-World Revenue Validation
+
+Full audit in `docs/M10_REAL_WORLD_AUDIT.md`; the REAL/DEV_FIXTURE/
+HUMAN_ACTION/SIMULATED boundary and provider registry in
+`docs/M10_REAL_WORLD_BOUNDARY.md`. This section covers what changes,
+security-wise, when the system's inputs can be genuinely real rather
+than exclusively fixture/simulated.
+
+### Containment boundary, reaffirmed
+
+M10 adds no new agent, no new Guardian permission, and no new EXECUTE
+path. The one new external-content channel — real signals sourced via
+this session's own WebSearch tool, standing in for the network-blocked
+live `HackerNewsSource`/`StackExchangeSource` — feeds the *same*
+`signalService.ingest()` path M3 already built and already hardened
+(dedup, quality scoring, no invented excerpts, reliability capped at
+`LOW` for this specific channel — `src/domain/evidence/
+source-reliability-policy.ts`). No new ingestion trust boundary was
+created; an existing one gained a second, more conservatively-trusted
+caller.
+
+### Threat review
+
+| Threat | Mitigation | Verification |
+|---|---|---|
+| Real, attacker-controlled web content (a malicious forum post, a prompt-injection attempt embedded in a real page) reaches an agent's reasoning | Same discipline as M3: raw signal content is normalized data, never concatenated into a system prompt as instructions; `signalService.ingest()` performs no interpretation of its own. `OperatorWebSearchSource` results pass through this identical path — no new parsing/rendering surface | `tests/integration/m10-real-signal-provenance.test.ts` (structural — the ingestion code path is unmodified and already covered by M3's own security tests) |
+| A dev-fixture result is mistaken for real, or vice versa | Every result carries an explicit `RealityLabel` (`REAL`/`DEV_FIXTURE`/`HUMAN_ACTION`/`SIMULATED`), embedded in `metadata.realWorld` and refusing construction with an empty provenance note for `REAL`/`HUMAN_ACTION` | `tests/unit/m10-real-world.test.ts` |
+| A real customer's PII leaks into an unrelated agent's context or becomes permanent institutional memory without review | Unchanged M5 boundary: `Prospect.publicContactChannel` is always a public, dereferenceable source, never a private contact method (`docs/M5_ARCHITECTURE_PROPOSAL.md`); this session's own real prospect leads carried only public forum/blog URLs, no private information. `decisionMemoryService`'s lessons remain scoped to `DecisionOutcome`/`LearningRecord` — a real customer's raw response text is never itself promoted to institutional memory, only the (human-reviewed) claim/evidence it produces | Structural — code review; no new code path writes raw customer text into `LearningRecord` |
+| A real payment webhook is replayed, or a duplicate delivery double-counts revenue | Already built and unchanged: `WebhookDelivery` is unique per `[provider, deliveryId]` (M7); a second delivery of the same id is rejected outright, never reprocessed | `tests/integration/m7-capstone-billing.test.ts` (pre-existing, unmodified) |
+| Autonomous cold-contact of a real stranger | Structurally impossible, not merely policy: `messageApprovalService` has no send method anywhere in this codebase (`src/services/message-approval.service.ts`'s own doc comment); this milestone's own customer-discovery run (`scripts/m10-customer-discovery.ts`) stops at a human-approved draft and never calls anything resembling a send | Structural — a repo-wide grep for a send capability finds none; the script's own recorded stopping point |
+| A real external provider credential (a future real Stripe/SMTP/hosting key) leaks into logs, audit rows, or a committed file | No such credential exists in this environment to leak (`docs/M10_REAL_WORLD_AUDIT.md`); `dev-secret-provider.ts` remains the only secret provider, `DEV_FIXTURE` only, and `.env`/`.env.example` carry no real provider keys | `tests/unit/m10-provider-registry.test.ts` regression-guards every provider factory to its `DEV_FIXTURE` singleton |
+| Rate-limit/tool abuse via the real signal channel | `OperatorWebSearchSource` shares `SourceSearchTool`'s existing rate limiter and Guardian `READ_WEB` authorization — no bypass, no new unbounded path | Structural — the class implements the same `ResearchSource` interface every rate-limited adapter does |
+
+### Privacy (brief Part 35)
+
+Minimum information collected: this milestone's real prospect research
+recorded exactly two `Prospect` rows, each with a **real, public**
+`sourceUrl` (a forum thread, a Substack post) and a
+`DEV_FIXTURE`-generated `organization`/`role` — meaning no real name,
+email, or private contact detail was ever extracted, because no real
+model exists in this environment to extract one. This is an honest
+capability ceiling, not a deliberately engineered privacy control, and
+is called out as such: a future run with a real model key would need
+`icpAnalystService`/`prospectResearcherService`'s own existing
+`publicContactChannel`-only discipline (`docs/M5_ARCHITECTURE_PROPOSAL.md`)
+to keep holding. Customer data is not automatically promoted to
+institutional memory (see threat table above) — an explicit policy
+gap the brief asks to be named rather than silently assumed: no code
+in this build currently distinguishes "a customer consented to their
+data informing future decisions" from "a customer merely responded";
+today, the only data that reaches `decisionMemoryService` is the
+human-reviewed claim/evidence a response produces, never raw response
+text, which is the closest thing to that policy this build has without
+an explicit consent field — a real gap if this system ever operates
+against real customers at volume, named here rather than assumed away.
+
+### Verification
+
+`npm test` (full suite, `tests/setup.ts` extended with
+`realWorldExperiment.deleteMany()` in FK-safe order — the same class of
+bug M9's own audit caught, regression-guarded here before it could
+recur); `npx tsc --noEmit`; `npx eslint src tests scripts`.

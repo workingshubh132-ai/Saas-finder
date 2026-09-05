@@ -20,6 +20,14 @@ export const SOURCE_RELIABILITY: Readonly<Record<string, EvidenceReliability>> =
   // slightly more structure than a bare discussion thread, but authors
   // are still pseudonymous and unverified, so this stays MEDIUM too.
   stack_exchange: "MEDIUM",
+  // M10 (docs/M10_REAL_WORLD_AUDIT.md) — real content, but thinner and
+  // less independently verifiable than a direct API/page fetch: a
+  // general web search result mixes genuine first-person discussion
+  // with vendor marketing content about the same topic, and this
+  // adapter (unlike hacker_news/stack_exchange) carries only a title,
+  // no body. LOW, not MEDIUM, until a specific result is independently
+  // corroborated.
+  operator_web_search: "LOW",
 };
 
 /**

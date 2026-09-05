@@ -17,6 +17,8 @@ export interface CreateOperatingCycleInput {
   startedByIdentityId: string;
   scheduledFor?: Date | null;
   startedAt?: Date | null;
+  /** M10 — docs/M10_REAL_WORLD_AUDIT.md §38. Null for every M1-M9 cycle and any cycle not part of a real-world experiment. */
+  realWorldExperimentId?: string | null;
 }
 
 export interface UpdateOperatingCycleInput {

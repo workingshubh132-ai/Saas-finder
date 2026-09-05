@@ -38,6 +38,8 @@ export interface StartCycleParams {
   kind?: CycleKind;
   scheduledFor?: Date | null;
   idempotencyKey?: string | null;
+  /** M10 — docs/M10_REAL_WORLD_AUDIT.md §38. Omitted for every ordinary (non-experiment) cycle. */
+  realWorldExperimentId?: string | null;
 }
 
 export interface AdvanceStageResult {
@@ -95,6 +97,7 @@ export const schedulerService = {
       startedByIdentityId: params.startedBy.identityId,
       scheduledFor,
       startedAt: startsImmediately ? new Date() : null,
+      realWorldExperimentId: params.realWorldExperimentId ?? null,
     });
 
     const createdEvent = await operatingCycleRepository.createStageEvent({ cycleId: cycle.id, stage: "CREATED" });

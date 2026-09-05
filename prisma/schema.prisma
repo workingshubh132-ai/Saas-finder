@@ -462,6 +462,9 @@ model Identity {
   /// M9 — docs/M9_ARCHITECTURE_PROPOSAL.md §55.
   operatingCyclesStarted OperatingCycle[]
 
+  /// M10 — docs/M10_REAL_WORLD_AUDIT.md §38.
+  realWorldExperimentsCreated RealWorldExperiment[]
+
   @@index([agentId])
   @@index([status])
   @@map("identities")
@@ -2590,9 +2593,48 @@ model OperatingCycle {
   stageEvents            CycleStageEvent[]
   companyRecommendations CompanyRecommendation[]
 
+  /// M10 — docs/M10_REAL_WORLD_AUDIT.md. Nullable: every M1-M9 cycle
+  /// predates this column and stays a valid, unaffiliated cycle.
+  /// OperatingCycle has no generic metadata JSON column (unlike
+  /// Opportunity/Signal), so this is a real FK rather than an
+  /// embedded tag — the one schema change this milestone's
+  /// traceability chain (§38) actually needs.
+  realWorldExperimentId String?             @map("real_world_experiment_id")
+  realWorldExperiment   RealWorldExperiment? @relation(fields: [realWorldExperimentId], references: [id], onDelete: SetNull)
+
   @@index([status])
   @@index([stage])
+  @@index([realWorldExperimentId])
   @@map("operating_cycles")
+}
+
+/// M10 — docs/M10_REAL_WORLD_AUDIT.md §38: the one durable identity a
+/// real-world experiment's whole chain (cycle -> opportunity ->
+/// customer -> product -> revenue -> outcome) traces back to. Everything
+/// below OperatingCycle in that chain already has its own FK to
+/// something with an experiment (Opportunity -> OperatingCycle isn't
+/// direct, but Opportunity/Signal/Product all carry a free-form
+/// `metadata` JSON column already — see src/domain/real-world/
+/// reality.types.ts's RealWorldTag — so this table is deliberately not
+/// duplicated onto every leaf entity.
+model RealWorldExperiment {
+  id String @id @default(cuid())
+
+  name      String
+  objective String
+
+  /// SCHEDULED | RUNNING | COMPLETED | ABANDONED (REAL_WORLD_EXPERIMENT_STATUSES).
+  status String @default("RUNNING")
+
+  startedAt DateTime  @default(now()) @map("started_at")
+  endedAt   DateTime? @map("ended_at")
+
+  createdByIdentityId String   @map("created_by_identity_id")
+  createdByIdentity   Identity @relation(fields: [createdByIdentityId], references: [id], onDelete: Restrict)
+
+  operatingCycles OperatingCycle[]
+
+  @@map("real_world_experiments")
 }
 
 /// One row per stage the cycle has entered (§15) — what makes
