@@ -6,7 +6,7 @@ import { hashBillingPlan } from "../domain/approval/resource-snapshot.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString } from "../domain/shared/json.js";
 import { createBillingProvider } from "../providers/billing-provider-factory.js";
-import { assertHumanActor, type Actor } from "./agent.service.js";
+import { assertHumanOrSystemActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 import { billingPlanService } from "./billing-plan.service.js";
@@ -33,7 +33,8 @@ interface PricingTier {
  */
 export const billingActivationService = {
   async activate(params: ActivateBillingParams): Promise<BillingAccount> {
-    assertHumanActor(params.actor);
+    // docs/AUTONOMOUS_OPERATIONS_AUDIT.md — HUMAN or the orchestrator's own SYSTEM identity completing an already-decided approval; see assertHumanOrSystemActor's own doc comment.
+    assertHumanOrSystemActor(params.actor);
     // Fails closed (docs/M9_ARCHITECTURE_PROPOSAL.md §57) — checked at every EXECUTE step, alongside the staleness check below.
     await emergencyStopService.assertNotActive();
 

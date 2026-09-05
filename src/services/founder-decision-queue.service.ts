@@ -1,3 +1,4 @@
+import { alertRepository } from "../db/repositories/alert.repository.js";
 import { approvalRepository } from "../db/repositories/approval.repository.js";
 import { businessReviewMemoRepository } from "../db/repositories/business-review-memo.repository.js";
 import { companyRecommendationRepository } from "../db/repositories/company-recommendation.repository.js";
@@ -125,11 +126,33 @@ export const founderDecisionQueueService = {
     }));
   },
 
+  /**
+   * Autonomous Operations Phase A (docs/AUTONOMOUS_OPERATIONS_AUDIT.md)
+   * — a real, previously-missing source: `alertService.raise()` has
+   * always computed its own attention score, but nothing ever unioned
+   * unacknowledged Alerts into the founder's queue until now.
+   */
+  async listUnacknowledgedAlerts(): Promise<DecisionQueueEntry[]> {
+    const alerts = await alertRepository.listUnacknowledged();
+    return alerts.map((a) => ({
+      sourceKind: "ALERT" as const,
+      source: "ALERT" as const,
+      id: a.id,
+      resourceType: a.resourceType,
+      resourceId: a.resourceId,
+      summary: a.message,
+      riskLevel: a.severity === "CRITICAL" ? "RED" : "YELLOW",
+      createdAt: a.firstSeenAt,
+      expiresAt: null,
+    }));
+  },
+
   async listPending(): Promise<DecisionQueueEntry[]> {
-    const [approvals, memoEntries, companyEntries] = await Promise.all([
+    const [approvals, memoEntries, companyEntries, alertEntries] = await Promise.all([
       approvalRepository.listQueue(),
       this.listUndecidedMemos(),
       this.listUndecidedCompanyRecommendations(),
+      this.listUnacknowledgedAlerts(),
     ]);
 
     const approvalEntries: DecisionQueueEntry[] = approvals.map((a) => ({
@@ -144,6 +167,6 @@ export const founderDecisionQueueService = {
       expiresAt: a.expiresAt,
     }));
 
-    return [...approvalEntries, ...memoEntries, ...companyEntries];
+    return [...approvalEntries, ...memoEntries, ...companyEntries, ...alertEntries];
   },
 };

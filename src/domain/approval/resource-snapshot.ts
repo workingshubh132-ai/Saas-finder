@@ -1,4 +1,4 @@
-import type { BillingPlan, DeploymentPlan, GrowthExperiment } from "@prisma/client";
+import type { BillingPlan, DeploymentPlan, GrowthExperiment, OutreachMessage } from "@prisma/client";
 import { computeResourceStateHash } from "./staleness.js";
 
 /**
@@ -27,4 +27,18 @@ export function hashBillingPlan(plan: Pick<BillingPlan, "provider" | "pricingMod
 
 export function hashGrowthExperiment(experiment: Pick<GrowthExperiment, "hypothesis" | "estimatedCostUsd" | "riskLevel">): string {
   return computeResourceStateHash({ hypothesis: experiment.hypothesis, estimatedCostUsd: experiment.estimatedCostUsd, riskLevel: experiment.riskLevel });
+}
+
+/**
+ * Autonomous Operations Phase A (docs/AUTONOMOUS_OPERATIONS_AUDIT.md) —
+ * `OutreachMessage.content` is already immutable by construction (no
+ * update method in outreach-message.repository.ts), so this can never
+ * actually change after the human approved it; `prospectId` is
+ * included anyway as the one field whose change genuinely would mean
+ * "send this to someone else" — the exact scenario approval binding
+ * exists to catch. `reasoning`/`experimentId`/`claimBeingTestedId`
+ * excluded: none of them changes what gets sent to whom.
+ */
+export function hashOutreachMessage(message: Pick<OutreachMessage, "prospectId" | "content">): string {
+  return computeResourceStateHash({ prospectId: message.prospectId, content: message.content });
 }

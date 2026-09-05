@@ -4,7 +4,7 @@ import { hashGrowthExperiment } from "../domain/approval/resource-snapshot.js";
 import { GROWTH_EXPERIMENT_TRANSITIONS, isGrowthExperimentStatus } from "../domain/growth-experiment/growth-experiment.types.js";
 import { ValidationError } from "../domain/shared/errors.js";
 import { assertTransition } from "../domain/shared/state-machine.js";
-import { assertHumanActor, type Actor } from "./agent.service.js";
+import { assertHumanOrSystemActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 
@@ -87,7 +87,9 @@ export const growthExperimentService = {
 
   /** Idempotent, mirrors deploymentPlanService.applyDecision exactly — never itself starts the experiment; a separate, human-gated EXECUTE step (growthExperimentExecutionService.approveToRun) does that. */
   async applyDecision(params: ApplyGrowthExperimentDecisionParams): Promise<GrowthExperiment> {
-    assertHumanActor(params.actor);
+    // See agent.service.ts's assertHumanOrSystemActor doc comment — this only ever mechanically applies
+    // a decision an ApprovalRequest already recorded; it re-verifies APPROVED/REJECTED itself below.
+    assertHumanOrSystemActor(params.actor);
 
     const approvalRequest = await approvalService.getOrThrow(params.approvalRequestId);
     if (approvalRequest.resourceType !== "GROWTH_EXPERIMENT" || !approvalRequest.resourceId) {

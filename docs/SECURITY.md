@@ -1657,3 +1657,65 @@ against real customers at volume, named here rather than assumed away.
 `realWorldExperiment.deleteMany()` in FK-safe order — the same class of
 bug M9's own audit caught, regression-guarded here before it could
 recur); `npx tsc --noEmit`; `npx eslint src tests scripts`.
+
+## Autonomous Operations Phase A
+
+Full audit in `docs/AUTONOMOUS_OPERATIONS_AUDIT.md`. This section covers
+what changes, security-wise, when consequential steps can fire
+automatically rather than exclusively on a human's own explicit call.
+
+### The one real relaxation, and its exact boundary
+
+`assertHumanOrSystemActor` (`src/services/agent.service.ts`) is the
+single security-relevant change this phase makes: seven call sites that
+were `assertHumanActor`-only now also accept a `SYSTEM`-typed actor —
+`messageApprovalService.applyDecision`/`markContacted`,
+`deploymentPlanService.applyDecision`, `deploymentService.execute`,
+`billingPlanService.applyDecision`, `billingActivationService.activate`,
+`decisionRecordService.applyHumanDecision`,
+`growthExperimentExecutionService.approveToRun`,
+`outboundMessageService.send`. Every one of these was already, by its
+own pre-existing design, a pure "mechanically complete an
+already-decided ApprovalRequest" step — each independently re-verifies
+the request is APPROVED, bound to the exact resource, and fresh, before
+doing anything, regardless of caller. `assertHumanOrSystemActor` only
+removes the requirement that the caller *additionally* be human on top
+of that already-complete verification; it is never used as a
+replacement for `assertHumanActor` on any function that itself
+represents a decision (`approvalService.decide`,
+`messageApprovalService.applyDecision`'s own upstream `requestApproval`,
+`outreachExperimentService.approve`, every memo's own
+`recordHumanDecision`, `customerResponseService.record` — all
+unchanged, all still strictly human-only).
+
+`autonomousOperationsService` only ever constructs a `SYSTEM` actor
+from inside its own in-process `eventBus` handler
+(`handleHumanDecisionMade`), itself only reachable as the direct,
+synchronous consequence of `approvalService.decide()` — still
+`assertHumanActor`-gated — publishing `HUMAN_DECISION_MADE`. A `SYSTEM`
+identity can also be created and issue its own bearer token (`SYSTEM`
+has been a valid `IdentityType` since M1), but only a HUMAN identity
+may create one — provisioning that credential is itself a deliberate,
+audited human act, not a bypass.
+
+### Threat review
+
+| Threat | Mitigation | Verification |
+|---|---|---|
+| A `SYSTEM`-typed caller reaches EXECUTE for a resource that was never actually approved | Every widened function independently re-fetches and re-checks the ApprovalRequest's own `status`/`resourceType`/`resourceId` before doing anything — the actor-type relaxation adds no new trust in the resource state itself | `tests/integration/autonomous-operations.test.ts` |
+| A resource changes between approval and the now-automatic EXECUTE | Unchanged M9 mechanism, now exercised on a new resource type: `hashOutreachMessage` + `approvalService.assertFresh()` inside `outboundMessageService.send()` | `tests/integration/autonomous-operations.test.ts` |
+| A retry (webhook redelivery, a crashed process resuming) sends the same message twice | `outboundMessageService.send()` checks for an existing SENT `OutreachMessageDelivery` before ever calling the provider; `DevOutboundMessageProvider` is additionally idempotent per `idempotencyKey` as a second, independent floor | `tests/integration/autonomous-operations.test.ts` |
+| Unbounded retry after a real failure | `MAX_SEND_ATTEMPTS` (3) — a message that has failed that many times throws instead of trying again, requiring a human to look | `tests/integration/autonomous-operations.test.ts` |
+| An event handler throws and takes the publisher (or another subscriber) down with it | `eventBus.publish()` now awaits each subscriber inside its own try/catch — one handler's failure is logged and isolated, never propagated | Structural — `src/services/event-bus.ts` |
+| A malicious or malformed event payload reaches a handler | Every handler validates its own payload's shape (`typeof payload.x === "string"`) before using it, and unions on the closed `resourceType`/`event.type` — an unrecognized value is a silent no-op, never a guess | Structural — code review |
+| Emergency Stop is bypassed by the new automatic paths | `outboundMessageService.send()` calls `emergencyStopService.assertNotActive()` at the same point every other EXECUTE step already does — unchanged, fails closed | `tests/integration/autonomous-operations.test.ts` |
+| Company Budget is bypassed by the new automatic paths | `outboundMessageService.send()` calls `companyBudgetService.assertNotExceeded()` before ever reaching the provider, checks its returned `.exceeded` flag itself (the function only computes and returns the check — same non-throwing contract `scheduler.service.ts` already relies on, docs/DECISIONS.md), raises a `BUDGET_EXHAUSTED` alert, and throws rather than sending | `tests/integration/autonomous-operations.test.ts` |
+| Rate abuse via the new send path | `checkRateLimit("outbound_message", ...)` — the same limiter every research source already uses, a new conservative key | Structural — shares `src/sources/rate-limiter.ts` |
+| A real customer response contains prompt injection, malicious URLs, or fabricated instructions | Unchanged M5/M4 discipline: `responseAnalystService`'s own structured extraction never treats response text as instructions, and `handleCustomerResponseRecorded` only ever calls it with a `customerResponseId` — the response's own content never reaches a system prompt, a permission, or this file's own control flow | Structural — code review; unchanged since M5 |
+| Customer text modifies permissions, Guardian, approval policy, provider credentials, code, or company configuration | No code path in `autonomousOperationsService` or `outboundMessageService` ever writes to any of those from event payload content — every handler either re-reads real DB state or forwards a resource id, never raw text, into a decision | Structural — code review |
+| Cross-customer data leakage via the automatic response/opportunity chain | `handleOpportunityDiscovered`/`handleCustomerResponseRecorded` operate on exactly the one `opportunityId`/`customerResponseId` named in the event payload — no cross-opportunity query exists in either handler | Structural — code review |
+| A real outbound provider credential leaks | No such credential exists in this environment (`docs/M10_REAL_WORLD_AUDIT.md`); `DevOutboundMessageProvider` remains `DEV_FIXTURE` only | `tests/unit/m10-provider-registry.test.ts`-style regression guard |
+
+### Verification
+
+`npm test`; `npm run typecheck`; `npm run lint`.

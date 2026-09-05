@@ -82,9 +82,15 @@ async function resetDatabase(): Promise<void> {
   // (Restrict) so it precedes both; outreachMessage references
   // prospect/claim (Restrict) so it precedes both; outreachExperiment
   // references claim/icpProfile (Restrict) so it precedes both.
+  // outreachMessageDelivery references outreachMessage (Restrict, Autonomous
+  // Operations Phase A) so it must be gone before outreachMessage too — a
+  // real gap this build's own autonomous-operations.test.ts caught: without
+  // it, the first test to create a delivery row broke every later test's
+  // reset with a foreign-key violation.
   await prisma.customerDiscoveryMemo.deleteMany();
   await prisma.customerEvidence.deleteMany();
   await prisma.customerResponse.deleteMany();
+  await prisma.outreachMessageDelivery.deleteMany();
   await prisma.outreachMessage.deleteMany();
   await prisma.outreachExperiment.deleteMany();
   await prisma.prospect.deleteMany();

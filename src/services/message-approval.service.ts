@@ -1,7 +1,8 @@
 import type { ApprovalRequest, OutreachMessage } from "@prisma/client";
 import { outreachMessageRepository } from "../db/repositories/outreach-message.repository.js";
+import { hashOutreachMessage } from "../domain/approval/resource-snapshot.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
-import { assertHumanActor, type Actor } from "./agent.service.js";
+import { assertHumanOrSystemActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
@@ -50,6 +51,7 @@ export const messageApprovalService = {
       resourceType: "OUTREACH_MESSAGE",
       resourceId: message.id,
       reason: message.reasoning,
+      resourceStateHash: hashOutreachMessage(message),
     });
 
     await outreachMessageRepository.attachApprovalRequest(message.id, approvalRequest.id);
@@ -78,7 +80,9 @@ export const messageApprovalService = {
    * separate, explicit markContacted call before it means anything.
    */
   async applyDecision(params: ApplyMessageDecisionParams): Promise<OutreachMessage> {
-    assertHumanActor(params.actor);
+    // See agent.service.ts's assertHumanOrSystemActor doc comment — this only ever mechanically applies
+    // a decision an ApprovalRequest already recorded; it re-verifies APPROVED/REJECTED itself below.
+    assertHumanOrSystemActor(params.actor);
 
     const approvalRequest = await approvalService.getOrThrow(params.approvalRequestId);
     if (approvalRequest.resourceType !== "OUTREACH_MESSAGE" || !approvalRequest.resourceId) {
@@ -101,17 +105,22 @@ export const messageApprovalService = {
   },
 
   /**
-   * Human-Owner-only record-keeping (docs/M5_ARCHITECTURE_PROPOSAL.md
-   * §13) — requires the message's OWN approvalRequestId to already be
-   * APPROVED, re-verified here rather than trusting message.status
-   * alone (mirrors decisionRecordService.applyHumanDecision's own
-   * precondition check). There is no programmatic send capability
-   * anywhere in this codebase for this call to trigger — the Human
-   * Owner personally sends the approved text through their own
-   * channel, then confirms it here.
+   * Record-keeping, requiring the message's OWN approvalRequestId to
+   * already be APPROVED, re-verified here rather than trusting
+   * message.status alone (mirrors decisionRecordService.applyHumanDecision's
+   * own precondition check). Two real paths reach this call
+   * (docs/AUTONOMOUS_OPERATIONS_AUDIT.md): (1) no outbound provider is
+   * reachable (still the only path before Phase A, and still fully
+   * supported) — the Human Owner personally sends the approved text
+   * through their own channel, then confirms it here; (2)
+   * `outboundMessageService.send()` calls this automatically,
+   * SYSTEM-attributed, immediately after a real provider confirms
+   * SENT — never before. Either way this never itself transmits
+   * anything; it only records that a send (real or human-performed)
+   * already happened.
    */
   async markContacted(params: MarkContactedParams): Promise<OutreachMessage> {
-    assertHumanActor(params.actor);
+    assertHumanOrSystemActor(params.actor);
 
     const message = await outreachMessageService.getOrThrow(params.outreachMessageId);
     if (message.status !== "APPROVED_TO_CONTACT") {

@@ -4,7 +4,7 @@ import { growthExperimentResultRepository } from "../db/repositories/growth-expe
 import { hashGrowthExperiment } from "../domain/approval/resource-snapshot.js";
 import { MIN_EXPERIMENT_SAMPLE } from "../domain/growth-experiment/growth-experiment.types.js";
 import { ValidationError } from "../domain/shared/errors.js";
-import { assertHumanActor, type Actor } from "./agent.service.js";
+import { assertHumanOrSystemActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 import { emergencyStopService } from "./emergency-stop.service.js";
@@ -36,7 +36,7 @@ export interface CompleteExperimentParams {
  */
 export const growthExperimentExecutionService = {
   async approveToRun(params: ApproveToRunParams): Promise<GrowthExperiment> {
-    assertHumanActor(params.actor);
+    assertHumanOrSystemActor(params.actor);
     // Fails closed (docs/M9_ARCHITECTURE_PROPOSAL.md §57) — checked at every EXECUTE step, alongside the staleness check below.
     await emergencyStopService.assertNotActive();
 

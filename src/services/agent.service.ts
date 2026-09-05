@@ -44,6 +44,41 @@ export function assertHumanActor(actor: Actor): void {
   }
 }
 
+/**
+ * Autonomous Operations Phase A (docs/AUTONOMOUS_OPERATIONS_AUDIT.md) —
+ * used ONLY at the handful of EXECUTE-equivalent call sites that
+ * already independently re-verify one specific, already-decided,
+ * fresh ApprovalRequest before doing anything consequential
+ * (`deploymentService.execute`, `billingActivationService.activate`,
+ * `outboundMessageService.send`). Never a drop-in replacement for
+ * `assertHumanActor` — deciding whether to approve something
+ * (`approvalService.decide`, `messageApprovalService.applyDecision`,
+ * `decisionRecordService.applyHumanDecision`, pausing/cancelling a
+ * cycle, and every other human-decision entrypoint) stays strictly
+ * HUMAN-only, unchanged.
+ *
+ * `autonomousOperationsService` only ever constructs a `SYSTEM` actor
+ * from inside its own in-process event handler, itself only reachable
+ * as the direct, synchronous consequence of `approvalService.decide()`
+ * publishing `APPROVAL_APPROVED`/`HUMAN_DECISION_MADE` — and that call
+ * is `assertHumanActor`-gated. A `SYSTEM`-typed `Identity` can also be
+ * created and issue a real bearer token (unchanged since M1 — `SYSTEM`
+ * has always been a valid `IdentityType`), but only a HUMAN identity
+ * may create one (`identityService.createIdentity`) — provisioning a
+ * system-level credential is itself a deliberate, audited HUMAN act,
+ * not a bypass. Either way, the underlying approval-freshness/
+ * Emergency-Stop/budget checks inside the call still apply
+ * unconditionally — this function only removes the requirement that
+ * the caller *additionally* be human on top of an already-fully-verified
+ * approval, exactly what the brief's "automatic resumption" (item 8) asks
+ * for.
+ */
+export function assertHumanOrSystemActor(actor: Actor): void {
+  if (actor.actorType !== "HUMAN" && actor.actorType !== "SYSTEM") {
+    throw new NotHumanOwnerError(actor.actorId);
+  }
+}
+
 export const agentService = {
   /**
    * Registering an agent, granting it a capability, and changing its

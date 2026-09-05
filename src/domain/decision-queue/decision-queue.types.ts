@@ -20,7 +20,15 @@
  * rather than forcing a required opportunityId onto a genuinely
  * cross-cutting row.
  */
-export const DECISION_QUEUE_SOURCE_KINDS = ["APPROVAL_REQUEST", "MEMO", "COMPANY_RECOMMENDATION"] as const;
+/**
+ * ALERT (Autonomous Operations Phase A, docs/AUTONOMOUS_OPERATIONS_AUDIT.md)
+ * is a fourth source, following the exact COMPANY_RECOMMENDATION
+ * precedent above it: `alertService.raise()` already computes its own
+ * `computeFounderAttentionScore` at raise time, but had never actually
+ * reached the founder's own queue — this closes that real gap by
+ * unioning it here rather than building a second surface for it.
+ */
+export const DECISION_QUEUE_SOURCE_KINDS = ["APPROVAL_REQUEST", "MEMO", "COMPANY_RECOMMENDATION", "ALERT"] as const;
 export type DecisionQueueSourceKind = (typeof DECISION_QUEUE_SOURCE_KINDS)[number];
 
 /**
@@ -46,7 +54,7 @@ export function isMemoQueueSource(value: string): value is MemoQueueSource {
 /** The one common shape every queue entry is normalized to before scoring (docs/M9_ARCHITECTURE_PROPOSAL.md §18-19). */
 export interface DecisionQueueEntry {
   readonly sourceKind: DecisionQueueSourceKind;
-  readonly source: MemoQueueSource | "APPROVAL_REQUEST" | "COMPANY_RECOMMENDATION";
+  readonly source: MemoQueueSource | "APPROVAL_REQUEST" | "COMPANY_RECOMMENDATION" | "ALERT";
   readonly id: string;
   readonly resourceType: string;
   readonly resourceId: string | null;

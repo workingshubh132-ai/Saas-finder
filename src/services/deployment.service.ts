@@ -3,7 +3,7 @@ import { deploymentRepository } from "../db/repositories/deployment.repository.j
 import { hashDeploymentPlan } from "../domain/approval/resource-snapshot.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { createDeploymentProvider } from "../providers/deployment-provider-factory.js";
-import { assertHumanActor, type Actor } from "./agent.service.js";
+import { assertHumanActor, assertHumanOrSystemActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 import { deploymentPlanService } from "./deployment-plan.service.js";
@@ -33,7 +33,8 @@ export interface RollbackDeploymentParams {
  */
 export const deploymentService = {
   async execute(params: ExecuteDeploymentParams): Promise<Deployment> {
-    assertHumanActor(params.actor);
+    // docs/AUTONOMOUS_OPERATIONS_AUDIT.md — HUMAN or the orchestrator's own SYSTEM identity completing an already-decided approval; see assertHumanOrSystemActor's own doc comment.
+    assertHumanOrSystemActor(params.actor);
     // Fails closed (docs/M9_ARCHITECTURE_PROPOSAL.md §57) — checked at every EXECUTE step, alongside the staleness check below.
     await emergencyStopService.assertNotActive();
 

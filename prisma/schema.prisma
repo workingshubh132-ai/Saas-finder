@@ -1362,10 +1362,38 @@ model OutreachMessage {
 
   customerResponses CustomerResponse[]
 
+  /// Autonomous Operations Phase A — docs/AUTONOMOUS_OPERATIONS_AUDIT.md.
+  deliveries OutreachMessageDelivery[]
+
   @@index([experimentId])
   @@index([prospectId])
   @@index([status])
   @@map("outreach_messages")
+}
+
+/// One row per real send ATTEMPT (mirrors Deployment's own
+/// one-row-per-EXECUTE-attempt precedent) — never sent twice for the
+/// same message once a SENT row exists; outboundMessageService checks
+/// for one before ever calling the provider again. A FAILED attempt
+/// may be retried (a new row), matching Deployment's own bounded-retry
+/// precedent (docs/AUTONOMOUS_OPERATIONS_AUDIT.md).
+model OutreachMessageDelivery {
+  id String @id @default(cuid())
+
+  outreachMessageId String          @map("outreach_message_id")
+  outreachMessage   OutreachMessage @relation(fields: [outreachMessageId], references: [id], onDelete: Restrict)
+
+  provider    String
+  status      String
+  providerRef String @map("provider_ref")
+  detail      String
+
+  sentByIdentityId String   @map("sent_by_identity_id")
+  sentAt           DateTime @map("sent_at")
+
+  @@index([outreachMessageId])
+  @@index([status])
+  @@map("outreach_message_deliveries")
 }
 
 /// A human-pasted record of what a prospect actually said (§14) — no

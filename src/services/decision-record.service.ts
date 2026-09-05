@@ -7,7 +7,7 @@ import { opportunityRepository } from "../db/repositories/opportunity.repository
 import { ACTIONS_REQUIRING_APPROVAL, isCeoDecisionAction } from "../domain/decision/decision-action.types.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString, toJsonString } from "../domain/shared/json.js";
-import { assertHumanActor, type Actor } from "./agent.service.js";
+import { assertHumanOrSystemActor, type Actor } from "./agent.service.js";
 import { approvalService } from "./approval.service.js";
 import { auditService } from "./audit.service.js";
 import { eventBus } from "./event-bus.js";
@@ -87,7 +87,7 @@ export const decisionRecordService = {
    * necessarily already decided by a human to reach this point.
    */
   async applyHumanDecision(params: ApplyHumanDecisionParams): Promise<{ decisionRecord: DecisionRecord; killed: boolean }> {
-    assertHumanActor(params.actor);
+    assertHumanOrSystemActor(params.actor);
 
     const approvalRequest = await approvalService.getOrThrow(params.approvalRequestId);
     if (approvalRequest.status !== "APPROVED" && approvalRequest.status !== "REJECTED") {
