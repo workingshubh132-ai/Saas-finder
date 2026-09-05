@@ -12,6 +12,7 @@ process.env.PORT = process.env.PORT ?? "0";
 // No live model/network dependency in the automated suite — ever.
 process.env.MODEL_PROVIDER_MODE = "development";
 process.env.RESEARCH_TOOL_MODE = "development";
+process.env.OUTBOUND_MESSAGE_PROVIDER_MODE = "DEV_FIXTURE";
 
 const { prisma } = await import("../src/db/client.js");
 const { identityService } = await import("../src/services/identity.service.js");

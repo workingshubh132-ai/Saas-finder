@@ -2,6 +2,7 @@ import "dotenv/config";
 
 export type ModelProviderMode = "development" | "anthropic";
 export type ResearchToolMode = "development" | "live";
+export type OutboundMessageProviderMode = "DEV_FIXTURE" | "REAL";
 
 export const config = {
   port: Number(process.env.PORT ?? 3000),
@@ -23,6 +24,17 @@ export const config = {
    * docs/SOURCE_ADAPTERS.md.
    */
   researchToolMode: (process.env.RESEARCH_TOOL_MODE ?? "development") as ResearchToolMode,
+
+  /**
+   * "DEV_FIXTURE" (default) uses DevOutboundMessageProvider — an
+   * in-memory fixture that never transmits anything real (Autonomous
+   * Operations Phase A, docs/AUTONOMOUS_OPERATIONS_AUDIT.md). "REAL"
+   * is reserved for an actual outbound-message provider implementation,
+   * which does not exist in this codebase yet: requesting "REAL" fails
+   * closed (createOutboundMessageProvider throws ProviderNotConfiguredError)
+   * rather than silently falling back to DEV_FIXTURE. See docs/PHASE_A_CAPSTONE.md.
+   */
+  outboundMessageProviderMode: (process.env.OUTBOUND_MESSAGE_PROVIDER_MODE ?? "DEV_FIXTURE") as OutboundMessageProviderMode,
 
   /**
    * M6 (docs/M6_ARCHITECTURE_PROPOSAL.md §10) — every factory workspace
@@ -53,5 +65,10 @@ export function assertConfigValid(): void {
   }
   if (config.modelProviderMode === "anthropic" && !config.anthropicApiKey) {
     throw new Error("MODEL_PROVIDER_MODE=anthropic requires ANTHROPIC_API_KEY to be set. Refusing to start.");
+  }
+  if (config.outboundMessageProviderMode !== "DEV_FIXTURE" && config.outboundMessageProviderMode !== "REAL") {
+    throw new Error(
+      `OUTBOUND_MESSAGE_PROVIDER_MODE must be "DEV_FIXTURE" or "REAL" (got "${config.outboundMessageProviderMode}"). Refusing to start.`,
+    );
   }
 }

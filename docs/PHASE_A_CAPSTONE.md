@@ -41,8 +41,11 @@ check against a real provider endpoint (`api.sendgrid.com`) timed out —
 this container has no outbound network path to any real messaging API,
 identical in kind to M10's own finding for a real search/model provider.
 `createOutboundMessageProvider()` (`src/providers/outbound-message-provider-factory.ts`)
-accordingly returns only `DevOutboundMessageProvider` — the one provider
-that exists in this codebase.
+accordingly returns only `DevOutboundMessageProvider` in the default
+`OUTBOUND_MESSAGE_PROVIDER_MODE=DEV_FIXTURE` — the one provider that
+exists in this codebase; explicitly requesting `REAL` fails closed with
+`ProviderNotConfiguredError` rather than silently falling back to it
+(post-capstone hardening, below).
 
 ## Result: BLOCKED — PROVIDER NOT CONFIGURED
 
@@ -69,6 +72,22 @@ here.
 | Governance (staleness, Emergency Stop, Company Budget, bounded retry, rate limit) all correctly block a send | **Proven** | Same test file, "outboundMessageService.send() governance" scenarios (6 tests) |
 | A real message reaches a real human being | **Blocked — provider not configured** | No credential, no reachable endpoint, from this environment |
 | The real M10 message is left exactly as it was | **Confirmed** | Read-only query above; this capstone made no writes to `dev.db` |
+
+## Post-capstone hardening: an explicit, fail-closed provider mode
+
+This capstone's finding above was environmental (no credential, no
+reachable endpoint) — nothing in the code itself previously stopped a
+future misconfiguration from pointing the factory at a real
+implementation that doesn't exist, or from a real provider silently
+degrading back to the fixture. `config.outboundMessageProviderMode`
+(`OUTBOUND_MESSAGE_PROVIDER_MODE`, default `DEV_FIXTURE`) now makes that
+distinction explicit and code-enforced: **`DEV_FIXTURE` is simulated
+transmission and must never be interpreted as real-world delivery.
+`REAL` mode requires an explicitly configured real provider and fails
+closed when unavailable** — `createOutboundMessageProvider()` throws
+`ProviderNotConfiguredError` for `REAL`, with no fallback branch to
+DEV_FIXTURE, covered by `tests/unit/outbound-message-provider-mode.test.ts`.
+This repository still has no real outbound provider implementation.
 
 ## What would need to change for this to run for real
 

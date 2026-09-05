@@ -133,3 +133,18 @@ export class EmergencyStopActiveError extends DomainError {
     super("Company-wide emergency stop is active — no new consequential execution may start until a human resumes it.");
   }
 }
+
+/**
+ * Autonomous Operations Phase A hardening — thrown when a provider
+ * factory's REAL mode is explicitly requested but no real provider
+ * implementation exists to satisfy it. Never a signal to fall back to
+ * a DEV_FIXTURE provider — REAL must mean real, or fail closed.
+ */
+export class ProviderNotConfiguredError extends DomainError {
+  readonly statusCode = 503;
+  readonly errorCode: ErrorCode = "DOMAIN_ERROR";
+
+  constructor(providerName: string) {
+    super(`${providerName} is configured for REAL mode, but no real provider implementation exists in this deployment — refusing to fall back to DEV_FIXTURE.`);
+  }
+}

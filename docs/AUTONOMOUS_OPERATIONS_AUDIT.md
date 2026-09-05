@@ -96,6 +96,21 @@ wrapper (rate limit, budget, approval-freshness, idempotency) are still
 worth building now — they're real, complete, and provider-agnostic;
 only the live network call is blocked.
 
+**Post-capstone hardening (docs/PHASE_A_CAPSTONE.md):** the environment
+constraint above is an operational fact, not a code-enforced one on its
+own — nothing previously stopped `createOutboundMessageProvider()` from
+being pointed at a real implementation without one existing. An
+explicit runtime mode now closes that gap: `config.outboundMessageProviderMode`
+(`OUTBOUND_MESSAGE_PROVIDER_MODE`, default `DEV_FIXTURE`) decides which
+provider the factory returns, and `REAL` throws `ProviderNotConfiguredError`
+rather than ever silently returning `DevOutboundMessageProvider` — no
+fallback path exists to fall back through. **`DEV_FIXTURE` is simulated
+transmission and must never be interpreted as real-world delivery.
+`REAL` mode requires an explicitly configured real provider and fails
+closed when unavailable.** This repository still has no real outbound
+provider implementation — building one remains exactly the scope
+described above, unchanged.
+
 ## 5. What can be reused as-is (must not be duplicated)
 
 Guardian/permissions, the approval engine, Chairman, the CEO reasoning
