@@ -64,6 +64,8 @@ model Agent {
   prospectsDiscovered       Prospect[]
   outreachMessagesDrafted   OutreachMessage[]
   customerEvidenceExtracted CustomerEvidence[]
+  /// Discovery vertical slice — docs/DISCOVERY_EXPERIMENT_VERTICAL_SLICE.md.
+  prospectResearchProfilesCreated ProspectResearchProfile[]
 
   /// M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §34.
   productSpecsGenerated     ProductSpec[]
@@ -1269,10 +1271,59 @@ model Prospect {
   /// Customer Discovery + Validation layer — docs/CUSTOMER_DISCOVERY_VALIDATION.md.
   discoveryInteractions CustomerDiscoveryInteraction[]
 
+  /// Discovery vertical slice — docs/DISCOVERY_EXPERIMENT_VERTICAL_SLICE.md.
+  researchProfile ProspectResearchProfile?
+
   @@index([opportunityId])
   @@index([icpProfileId])
   @@index([status])
   @@map("prospects")
+}
+
+/// One row per Prospect (1:1) — the richer pre-contact research output
+/// the discovery vertical slice adds on top of the existing Prospect
+/// fields (organization/role/publicContactChannel/reasonForMatch), never
+/// duplicating them. Written once, by prospectResearcherService, in the
+/// same execution that creates the Prospect it belongs to.
+model ProspectResearchProfile {
+  id String @id @default(cuid())
+
+  prospectId String   @unique @map("prospect_id")
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  businessName String  @map("business_name")
+  /// A real value or the literal string "UNKNOWN" — never a fabricated guess (mirrors this codebase's established "UNKNOWN" sentinel convention, e.g. icpAnalystService's honestly-ASSUMED fields).
+  industry     String
+  location     String
+  website      String
+
+  /// One of CONTACT_TYPES (contact-type.ts) — verifyContactType() has already run by the time this is persisted, so WHATSAPP here is always structurally verified, never a bare claim.
+  contactType   String @map("contact_type")
+  /// Where/how this exact channel was found — never empty (§4: every contact must include provenance).
+  contactSource String @map("contact_source")
+
+  /// A public role/title only (e.g. "Owner", "Operations Manager") — never a private individual's name unless the business itself publicly lists that name as its contact.
+  decisionMaker String @map("decision_maker")
+
+  /// JSON array of {text, provenance: OBSERVED|INFERRED|UNKNOWN} — src/domain/customer-discovery/provenance.ts, reused verbatim, not a second taxonomy.
+  workflowSignals String @map("workflow_signals")
+  /// Same shape as workflowSignals.
+  painHypotheses  String @map("pain_hypotheses")
+
+  /// Deterministically capped, never trusted raw from the model — see verifyProspectCandidateConfidence().
+  confidence Float
+
+  /// REAL | DEV_FIXTURE | HUMAN_ACTION | SIMULATED (src/domain/real-world/reality.types.ts) — reused verbatim.
+  reality        String
+  provenanceNote String @map("provenance_note")
+
+  createdByAgentId String @map("created_by_agent_id")
+  createdByAgent   Agent  @relation(fields: [createdByAgentId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([prospectId])
+  @@map("prospect_research_profiles")
 }
 
 /// A bounded, budgeted attempt to learn something specific from real

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { agentService } from "../../src/services/agent.service.js";
 import { icpAnalystService } from "../../src/services/icp-analyst.service.js";
 import { prospectResearcherService } from "../../src/services/prospect-researcher.service.js";
+import { prospectResearchProfileRepository } from "../../src/db/repositories/prospect-research-profile.repository.js";
 import { authActor, makeAgent, makeFullAgentSet, makeOpportunity, HUMAN_OWNER } from "../helpers.js";
 
 async function authorizedProspectResearcher() {
@@ -87,5 +88,44 @@ describe("prospectResearcherService", () => {
     // Same ICP -> same deterministic dev-fixture query -> same 3 URLs -> the second run must find zero *new* prospects.
     expect(first.result.prospects.length).toBeGreaterThan(0);
     expect(second.result.prospects).toHaveLength(0);
+  });
+
+  it("persists a ProspectResearchProfile per prospect, honestly labeled UNKNOWN/OTHER/DEV_FIXTURE — never a fabricated fact", async () => {
+    const agent = await authorizedProspectResearcher();
+    const { icpProfile } = await makeIcpProfile();
+
+    const outcome = await prospectResearcherService.run({ agentId: agent.id, icpProfileId: icpProfile.id, startedBy: authActor() });
+    expect(outcome.status).toBe("COMPLETED");
+    if (outcome.status !== "COMPLETED") return;
+
+    for (const prospect of outcome.result.prospects) {
+      const profile = await prospectResearchProfileRepository.findByProspectId(prospect.id);
+      expect(profile).not.toBeNull();
+      expect(profile!.industry).toBe("UNKNOWN");
+      expect(profile!.location).toBe("UNKNOWN");
+      expect(profile!.website).toBe("UNKNOWN");
+      // Never WHATSAPP without real structural evidence — the dev fixture's channel is a bare thread URL.
+      expect(profile!.contactType).toBe("OTHER");
+      expect(profile!.reality).toBe("DEV_FIXTURE");
+      expect(profile!.provenanceNote).toBeTruthy();
+    }
+  });
+
+  it("never marks a dev-fixture workflow signal or pain hypothesis as OBSERVED — no real reasoning occurred", async () => {
+    const agent = await authorizedProspectResearcher();
+    const { icpProfile } = await makeIcpProfile();
+
+    const outcome = await prospectResearcherService.run({ agentId: agent.id, icpProfileId: icpProfile.id, startedBy: authActor() });
+    expect(outcome.status).toBe("COMPLETED");
+    if (outcome.status !== "COMPLETED") return;
+
+    for (const prospect of outcome.result.prospects) {
+      const profile = await prospectResearchProfileRepository.findByProspectId(prospect.id);
+      const signals = JSON.parse(profile!.workflowSignals) as Array<{ provenance: string }>;
+      const pains = JSON.parse(profile!.painHypotheses) as Array<{ provenance: string }>;
+      for (const s of [...signals, ...pains]) expect(s.provenance).not.toBe("OBSERVED");
+      // No OBSERVED signal anywhere -> confidence must be capped low, never a false show of certainty.
+      expect(profile!.confidence).toBeLessThanOrEqual(0.4);
+    }
   });
 });

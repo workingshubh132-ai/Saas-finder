@@ -29,6 +29,7 @@ import { predictionOutcomesRouter } from "./routes/prediction-outcomes.routes.js
 import { pricingModelsRouter } from "./routes/pricing-models.routes.js";
 import { supportCasesRouter } from "./routes/support-cases.routes.js";
 import { customerDiscoveryInteractionsRouter } from "./routes/customer-discovery-interactions.routes.js";
+import { discoveryExperimentsRouter } from "./routes/discovery-experiments.routes.js";
 import { customerDiscoveryMemosRouter } from "./routes/customer-discovery-memos.routes.js";
 import { customerResponsesRouter } from "./routes/customer-responses.routes.js";
 import { customerValidationRouter } from "./routes/customer-validation.routes.js";
@@ -109,6 +110,7 @@ export function createApp(): Express {
   // Customer Discovery + Validation layer — docs/CUSTOMER_DISCOVERY_VALIDATION.md.
   app.use("/api/customer-discovery-interactions", customerDiscoveryInteractionsRouter);
   app.use("/api/customer-validation", customerValidationRouter);
+  app.use("/api/discovery-experiments", discoveryExperimentsRouter);
   // M6 — docs/M6_ARCHITECTURE_PROPOSAL.md §21.
   app.use("/api/products", productsRouter);
   app.use("/api/engineering-tasks", engineeringTasksRouter);
