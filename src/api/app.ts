@@ -53,6 +53,7 @@ import { problemsRouter } from "./routes/problems.routes.js";
 import { productReviewMemosRouter } from "./routes/product-review-memos.routes.js";
 import { productsRouter } from "./routes/products.routes.js";
 import { prospectsRouter } from "./routes/prospects.routes.js";
+import { prospectResearchImportRouter } from "./routes/prospect-research-import.routes.js";
 import { researchCyclesRouter } from "./routes/research-cycles.routes.js";
 import { researchQueueRouter } from "./routes/research-queue.routes.js";
 import { researchRouter } from "./routes/research.routes.js";
@@ -103,6 +104,7 @@ export function createApp(): Express {
   // M5 — docs/M5_ARCHITECTURE_PROPOSAL.md §23.
   app.use("/api/icp-profiles", icpProfilesRouter);
   app.use("/api/prospects", prospectsRouter);
+  app.use("/api/prospect-research", prospectResearchImportRouter);
   app.use("/api/outreach-experiments", outreachExperimentsRouter);
   app.use("/api/outreach-messages", outreachMessagesRouter);
   app.use("/api/customer-responses", customerResponsesRouter);
