@@ -3,6 +3,7 @@ import { z } from "zod";
 import { icpProfileRepository } from "../db/repositories/icp-profile.repository.js";
 import { prospectRepository } from "../db/repositories/prospect.repository.js";
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
+import type { EvidenceTargetingSignal } from "../domain/icp-profile/targeting-signal.js";
 import { ICP_FIT_LEVELS, PROSPECT_QUALIFICATION_STATUSES } from "../domain/prospect/qualification.js";
 import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { fromJsonString, toJsonString } from "../domain/shared/json.js";
@@ -58,8 +59,14 @@ export interface ProspectQualificationResult {
   prospect: Prospect;
 }
 
+/** EVIDENCED only — ASSUMED/INFERRED/UNKNOWN signals describe what isn't confirmed and must never be used to qualify a prospect. */
+function evidencedTargetingSignals(icp: IcpProfile): EvidenceTargetingSignal[] {
+  return fromJsonString<EvidenceTargetingSignal[]>(icp.evidenceTargetingSignals, []).filter((s) => s.provenance === "EVIDENCED");
+}
+
 function buildQualificationPrompt(prospect: Prospect, icp: IcpProfile): string {
   const exclusions = fromJsonString<string[]>(icp.exclusions, []);
+  const evidencedSignals = evidencedTargetingSignals(icp);
   return [
     `Prospect — organization: ${prospect.organization}`,
     `Prospect — role: ${prospect.role}`,
@@ -73,6 +80,9 @@ function buildQualificationPrompt(prospect: Prospect, icp: IcpProfile): string {
     `ICP — geography: ${icp.geography}`,
     `ICP — technology: ${icp.technology}`,
     `ICP — exclusions: ${exclusions.length > 0 ? exclusions.join(", ") : "(none)"}`,
+    `ICP — evidence-backed exposure signals (EVIDENCED only, i.e. actually confirmed by real research): ${
+      evidencedSignals.length > 0 ? evidencedSignals.map((s) => s.label).join("; ") : "(none)"
+    }`,
   ].join("\n");
 }
 
@@ -97,6 +107,23 @@ function buildDevQualificationFixture(prospect: Prospect, icp: IcpProfile): Qual
       qualificationStatus: "REJECTED",
       icpFit: "LOW",
       reasonForMatch: `[DEV FIXTURE] Organization/role text matches an explicit ICP exclusion: "${matchedExclusion}".`,
+      unknowns: DEFAULT_UNKNOWNS,
+    };
+  }
+
+  // An independent qualification path alongside the role-word-overlap check
+  // below (Design Requirement E) — the ICP's own role/problemExposure text
+  // can be thin dev-fixture boilerplate that rarely overlaps a real
+  // prospect's text at all, while an EVIDENCED targeting signal (e.g. a
+  // named platform actually seen in real research) is exactly the kind of
+  // concrete phrase a real prospect's own organization/role text plausibly
+  // contains. Never fires on ASSUMED/INFERRED/UNKNOWN signals.
+  const matchedSignal = evidencedTargetingSignals(icp).find((signal) => signal.matchTerms.some((term) => haystack.includes(term)));
+  if (matchedSignal) {
+    return {
+      qualificationStatus: "QUALIFIED",
+      icpFit: "HIGH",
+      reasonForMatch: `[DEV FIXTURE] Organization/role text matches an evidence-backed targeting signal: "${matchedSignal.label}" (${matchedSignal.provenance.toLowerCase()}).`,
       unknowns: DEFAULT_UNKNOWNS,
     };
   }

@@ -4,9 +4,10 @@ import { icpProfileRepository } from "../db/repositories/icp-profile.repository.
 import { claimRepository } from "../db/repositories/claim.repository.js";
 import { opportunityRepository } from "../db/repositories/opportunity.repository.js";
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
+import { extractTargetingSignals, selectTechnologySignal } from "../domain/icp-profile/extract-targeting-signals.js";
 import { icpFieldGroundingSchema, type IcpFieldGrounding } from "../domain/icp-profile/icp-field-grounding.js";
 import { NotFoundError } from "../domain/shared/errors.js";
-import { toJsonString } from "../domain/shared/json.js";
+import { fromJsonString, toJsonString } from "../domain/shared/json.js";
 import { agentRuntimeService, type ExecutionBudget, type RunOutcome } from "./agent-runtime.service.js";
 import { auditService } from "./audit.service.js";
 import { icpClaimService } from "./icp-claim.service.js";
@@ -180,6 +181,14 @@ export const icpAnalystService = {
         handle.step();
         const claims = await claimRepository.listForOpportunity(params.opportunityId);
         const evidence = await opportunityRepository.listEvidence(params.opportunityId);
+        // Evidence-derived, not model-derived (Part 46) — runs identically
+        // whether the reasoning above is a live model call or the dev
+        // fixture, so real technology/workflow signal is never lost to a
+        // thin dev-fixture extraction.
+        const targetingSignals = extractTargetingSignals(
+          evidence.map((e) => ({ id: e.id, text: `${e.claim} ${fromJsonString<{ content?: string }>(e.metadata, {}).content ?? ""}` })),
+        );
+        const technologySignal = selectTechnologySignal(targetingSignals);
 
         const { value: generation } = await completeWithValidation(handle.callModel, icpGenerationSchema, {
           systemPrompt: ICP_ANALYST_SYSTEM_PROMPT,
@@ -197,6 +206,24 @@ export const icpAnalystService = {
           (field) => groundingByField.get(field) ?? { field, groundedInClaimIds: [], status: "ASSUMED", reasoning: "Not explicitly grounded by the ICP Analyst; defaulted to ASSUMED." },
         );
 
+        // A real, evidence-backed technology signal takes precedence over
+        // the model/fixture's own "Any — not evidenced" default (Design
+        // Requirement A) — never the reverse, and never upgraded past what
+        // extractTargetingSignals itself already marked EVIDENCED/INFERRED
+        // (Design Requirement B: one named platform never silently becomes
+        // a universal requirement).
+        const technology = technologySignal?.label ?? generation.technology;
+        if (technologySignal) {
+          const technologyIndex = fieldGrounding.findIndex((g) => g.field === "technology");
+          fieldGrounding[technologyIndex] = {
+            field: "technology",
+            groundedInClaimIds: [],
+            groundedInEvidenceIds: technologySignal.groundedEvidenceIds,
+            status: technologySignal.provenance === "EVIDENCED" ? "EVIDENCED" : "INFERRED",
+            reasoning: technologySignal.reasoning,
+          };
+        }
+
         const icpProfile = await icpProfileRepository.create({
           opportunityId: params.opportunityId,
           industry: generation.industry,
@@ -206,9 +233,10 @@ export const icpAnalystService = {
           problemExposure: generation.problemExposure,
           likelyFrequency: generation.likelyFrequency,
           geography: generation.geography,
-          technology: generation.technology,
+          technology,
           exclusions: toJsonString(generation.exclusions),
           fieldGrounding: toJsonString(fieldGrounding),
+          evidenceTargetingSignals: targetingSignals.length > 0 ? toJsonString(targetingSignals) : null,
           generatedByAgentId: params.agentId,
         });
 

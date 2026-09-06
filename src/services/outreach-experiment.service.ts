@@ -1,8 +1,11 @@
 import type { OutreachExperiment } from "@prisma/client";
 import { claimRepository } from "../db/repositories/claim.repository.js";
+import { customerEvidenceRepository } from "../db/repositories/customer-evidence.repository.js";
+import { customerResponseRepository } from "../db/repositories/customer-response.repository.js";
 import { icpProfileRepository } from "../db/repositories/icp-profile.repository.js";
 import { outreachExperimentRepository, type CreateOutreachExperimentInput } from "../db/repositories/outreach-experiment.repository.js";
 import { assertHumanActor, type Actor } from "./agent.service.js";
+import { classifyExperimentDiscoveryOutcome, type ExperimentDiscoveryOutcome, type ResponseForOutcome } from "../domain/customer-response/experiment-outcome.js";
 import { DEFAULT_OUTREACH_LIMITS } from "../domain/outreach-experiment/outreach-limits.js";
 import { isContactPolicy, DEFAULT_CONTACT_POLICY } from "../domain/prospect/contact-policy.js";
 import { isOutreachExperimentStatus, OUTREACH_EXPERIMENT_STATUS_TRANSITIONS } from "../domain/outreach-experiment/outreach-experiment.types.js";
@@ -27,6 +30,14 @@ export interface SetOutreachExperimentStatusParams {
   reason: string | null;
   actorType: Actor["actorType"];
   actorId: string | null;
+}
+
+export interface DiscoveryOutcomeAssessment {
+  readonly experimentId: string;
+  readonly outcome: ExperimentDiscoveryOutcome;
+  readonly totalResponses: number;
+  readonly analyzedResponses: number;
+  readonly reasoning: string;
 }
 
 /**
@@ -148,5 +159,36 @@ export const outreachExperimentService = {
     });
 
     return updated;
+  },
+
+  /**
+   * Read-only (Design Requirement G). Replaces the naive "silence
+   * after N contacted = failure" reading of `failureCriteria` with an
+   * honest classification reusing only data the existing M5 pipeline
+   * already records — no new response system. NO_RESPONSE is reported
+   * as its own outcome, distinct from PROBLEM_NOT_PRESENT: silence is
+   * a distribution/outreach signal, never itself evidence the
+   * underlying problem is false.
+   */
+  async evaluateDiscoveryOutcome(experimentId: string): Promise<DiscoveryOutcomeAssessment> {
+    await outreachExperimentService.getOrThrow(experimentId);
+    const responses = await customerResponseRepository.listForExperiment(experimentId);
+
+    const responsesForOutcome: ResponseForOutcome[] = await Promise.all(
+      responses.map(async (r) => {
+        const evidence = await customerEvidenceRepository.listForResponse(r.id);
+        return { status: r.status, classification: r.classification, signalTypes: evidence.map((e) => e.signalType) };
+      }),
+    );
+
+    const outcome = classifyExperimentDiscoveryOutcome(responsesForOutcome);
+    const analyzedResponses = responsesForOutcome.filter((r) => r.status === "ANALYZED").length;
+
+    const reasoning =
+      outcome === "NO_RESPONSE"
+        ? `${responses.length} response(s) recorded, none analyzed yet — no data to classify. This is a distribution/outreach signal, not evidence the underlying problem is false.`
+        : `${analyzedResponses} analyzed response(s) considered; classified ${outcome} from their recorded classification/signal types.`;
+
+    return { experimentId, outcome, totalResponses: responses.length, analyzedResponses, reasoning };
   },
 };

@@ -1204,11 +1204,19 @@ model IcpProfile {
   exclusions      String
 
   /// JSON-encoded array of {field, groundedInClaimIds: string[],
-  /// status: EVIDENCED|ASSUMED, reasoning} — one entry per ICP field
-  /// above (§3), mirroring dimensionGrounding's own shape (M3). A
-  /// field with no real grounding is marked ASSUMED with an empty
-  /// groundedInClaimIds array, never invented specificity.
+  /// groundedInEvidenceIds?: string[], status: EVIDENCED|INFERRED|ASSUMED,
+  /// reasoning} — one entry per ICP field above (§3), mirroring
+  /// dimensionGrounding's own shape (M3). A field with no real
+  /// grounding is marked ASSUMED with an empty groundedInClaimIds
+  /// array, never invented specificity.
   fieldGrounding String @map("field_grounding")
+
+  /// JSON-encoded EvidenceTargetingSignal[] (extract-targeting-signals.ts)
+  /// — technology/workflow/operational signals mined directly from this
+  /// opportunity's real Evidence text, additive to the 8 fields above.
+  /// Nullable: every ICP profile created before this column existed
+  /// simply has none, never backfilled or invented.
+  evidenceTargetingSignals String? @map("evidence_targeting_signals")
 
   generatedByAgentId String @map("generated_by_agent_id")
   generatedByAgent   Agent  @relation(fields: [generatedByAgentId], references: [id], onDelete: Restrict)

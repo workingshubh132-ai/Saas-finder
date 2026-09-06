@@ -15,6 +15,8 @@ export interface CreateIcpProfileInput {
   exclusions: string;
   /** JSON-encoded IcpFieldGrounding. */
   fieldGrounding: string;
+  /** JSON-encoded EvidenceTargetingSignal[] — null when nothing was evidenced. */
+  evidenceTargetingSignals?: string | null;
   generatedByAgentId: string;
 }
 

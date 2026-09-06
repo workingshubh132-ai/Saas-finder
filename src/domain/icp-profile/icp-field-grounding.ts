@@ -11,12 +11,21 @@ import { z } from "zod";
  * arbitrary demographic assumptions"). A standalone domain file (not
  * defined inside icp-analyst.service.ts) so any future caller can
  * import the schema without a circular service dependency.
+ *
+ * "INFERRED" and `groundedInEvidenceIds` were added additively
+ * alongside the original EVIDENCED|ASSUMED axis (Part 46): a field
+ * whose value is a generalization derived from real Evidence — never
+ * itself a claim, and never merely "no evidence either way" — needs a
+ * third, honest state distinct from both. `groundedInEvidenceIds` is
+ * optional and empty by default so every pre-existing EVIDENCED/ASSUMED
+ * entry (claim-grounded only) remains valid unchanged.
  */
 export const icpFieldGroundingSchema = z.array(
   z.object({
     field: z.string().min(1),
     groundedInClaimIds: z.array(z.string().min(1)),
-    status: z.enum(["EVIDENCED", "ASSUMED"]),
+    groundedInEvidenceIds: z.array(z.string().min(1)).optional(),
+    status: z.enum(["EVIDENCED", "INFERRED", "ASSUMED"]),
     reasoning: z.string().min(1),
   }),
 );
