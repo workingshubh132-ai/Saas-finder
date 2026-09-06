@@ -2,7 +2,7 @@ import type { Opportunity, Signal } from "@prisma/client";
 import { z } from "zod";
 import type { AuthenticatedActor } from "../domain/identity/identity.types.js";
 import { dimensionGroundingSchema, type DimensionGrounding } from "../domain/evidence-gap/dimension-grounding.js";
-import { NotFoundError } from "../domain/shared/errors.js";
+import { NotFoundError, ValidationError } from "../domain/shared/errors.js";
 import { competitorRepository, type ObservationWithCompetitor } from "../db/repositories/competitor.repository.js";
 import { evidenceRepository } from "../db/repositories/evidence.repository.js";
 import { problemRepository } from "../db/repositories/problem.repository.js";
@@ -92,9 +92,10 @@ export interface OpportunityAnalystResult {
  * observations + Market Analyst output become ONE Opportunity
  * candidate, scored, kill-risk-assessed, and evidence-gap-tagged.
  * Never manufactures an Opportunity from a Problem that doesn't
- * support one — see `opportunityGeneratorService.generateFromProblem`,
- * which is the actual caller and owns the INSUFFICIENT_EVIDENCE
- * escape hatch (M3 brief Part 43).
+ * support one — `run()` itself refuses any Problem that isn't
+ * CANDIDATE or PROMOTED (Part 43) before writing anything, rather
+ * than relying on a caller's own convention to skip INSUFFICIENT_EVIDENCE
+ * problems.
  */
 export const opportunityAnalystService = {
   async run(params: RunOpportunityAnalystParams): Promise<RunOutcome<OpportunityAnalystResult>> {
@@ -110,6 +111,17 @@ export const opportunityAnalystService = {
       async (handle) => {
         const problem = await problemRepository.findById(params.problemId);
         if (!problem) throw new NotFoundError("Problem", params.problemId);
+        // The actual enforcement of "INSUFFICIENT_EVIDENCE never proceeds"
+        // (Part 43) belongs here, not only in one caller's loop —
+        // researchCycleService's own `continue` guard is a convention of
+        // that one orchestrator, not an intrinsic property of this
+        // service. PROMOTED stays allowed: a Problem may legitimately
+        // spawn more than one Opportunity framing over time (below).
+        if (problem.status !== "CANDIDATE" && problem.status !== "PROMOTED") {
+          throw new ValidationError(
+            `Problem ${problem.id} has status ${problem.status}, not CANDIDATE or PROMOTED — it does not meet the evidence bar for an Opportunity to be generated from it.`,
+          );
+        }
 
         const clusteredSignals = (await signalRepository.listByCluster(problem.clusterId)).filter((s) => s.status === "CLUSTERED");
         const evidence = await promoteSignalsToEvidence(clusteredSignals, params.agentId);

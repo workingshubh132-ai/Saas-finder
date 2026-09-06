@@ -16,7 +16,10 @@ const PROBLEM_ANALYST_BUDGET: Partial<ExecutionBudget> = { maxSteps: 2, maxToolC
 /** A cluster needs at least this much independent corroboration and
  *  extracted confidence before its Problem is worth promoting toward
  *  an Opportunity (docs/M3_ARCHITECTURE_PROPOSAL.md §7, Part 43). */
-const MIN_INDEPENDENT_SOURCES_TO_PROMOTE = 2;
+/** Exported so any other consumer of this bar (e.g. researchSignalImportService's
+ *  real-evidence assessment) reuses this single threshold rather than a second,
+ *  independently-drifting copy. */
+export const MIN_INDEPENDENT_SOURCES_TO_PROMOTE = 2;
 const MIN_CONFIDENCE_TO_PROMOTE = 0.3;
 
 const problemExtractionSchema = z.object({
